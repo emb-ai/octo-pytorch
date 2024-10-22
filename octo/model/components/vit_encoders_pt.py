@@ -14,7 +14,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 # from octo.model.components.film_conditioning_layer import FilmConditioning
-from octo.model.components.jax_pt import FromJaxModel
+from octo.model.components.jax_pt import FromJaxModel, ConvPt, GroupNormPt, StdConvPt
 
 T = TypeVar("T")
 
@@ -48,28 +48,6 @@ def weight_standardize(w, axis, eps):
     w = w - w.mean(dim=axis, keepdim=True)
     w = w / (w.std(dim=axis, keepdim=True) + eps)
     return w
-
-class ConvPt(nn.Conv2d, FromJaxModel):
-    """Ordinary convolution"""
-    def load_jax_weights(self, jax_params=None):
-        self._conv_load_handler(jax_params)
-
-class GroupNormPt(nn.GroupNorm, FromJaxModel):
-    def load_jax_weights(self, jax_params=None):
-        self._groupnorm_load_handler(jax_params)
-
-class StdConvPt(nn.Conv2d, FromJaxModel):
-    """Convolution with weight standardization."""
-    
-    def load_jax_weights(self, jax_params=None):
-        self._conv_load_handler(jax_params)
-
-    def forward(self, x):
-        w = self.weight
-        v, m = torch.var_mean(w, dim=[1, 2, 3], keepdim=True, unbiased=False)
-        w = (w - m) / torch.sqrt(v + 1e-10)
-        return F.conv2d(x, w, self.bias, self.stride, self.padding, self.dilation, self.groups)
-
 
 class PatchEncoderPt(nn.Module, FromJaxModel):
     """Takes an image and breaks it up into patches of size (patch_size x patch_size),
@@ -249,7 +227,7 @@ class ViTResnetPt(nn.Module):
                 in_features = out_features * 4
 
         if use_film:
-            self.film = FilmConditioning()
+            raise NotImplementedError
 
     def forward(self, observations: torch.Tensor, train: bool = True, cond_var=None):
         expecting_cond_var = self.use_film

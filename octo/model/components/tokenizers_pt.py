@@ -10,8 +10,8 @@ import numpy as np
 
 from octo.model.components.base import TokenGroupPt
 from octo.utils.spec import ModuleSpec
-from octo.model.components.jax_pt import FromJaxModel
-
+from octo.model.components.jax_pt import FromJaxModel, LayerNormPt
+from octo.model.components.transformer_pt import MAPHeadPt
 EPS = 1e-6
 
 
@@ -35,6 +35,43 @@ def generate_proper_pad_mask(
     pad_mask = pad_mask.unsqueeze(-1).expand(tokens.shape[:-1])
     return pad_mask
 
+class TokenLearnerPt(nn.Module, FromJaxModel):
+    """
+    Learns to map fixed-length sequence of tokens into specified number of tokens.
+
+    Args:
+        num_tokens (int): Number of output tokens.
+        bottleneck_dim (int): Size of the hidden layers of the mapping MLP.
+        dropout_rate (float): Rate of dropout applied in the mapping MLP. Defaults to no dropout.
+    """
+
+    def __init__(self, num_tokens: int, hid_dim: int, max_len: int = 5000):
+        super().__init__()
+        self.num_tokens = num_tokens
+        self.hid_dim = hid_dim
+        self.max_len = max_len
+
+        self.layer_norm = LayerNormPt(hid_dim)
+        self.map_head = MAPHeadPt(num_readouts=self.num_tokens)
+        pos_embed = torch.randn(max_len, self.hid_dim) * 0.02
+        self.register_parameter('pos_embed', pos_embed) # trainable
+
+    def forward(self, inputs: torch.Tensor, train: bool = True):
+        # Add positional embedding to inputs
+        x = inputs + self.pos_embed
+        
+        # Apply layer normalization
+        x = self.layer_norm(x)
+        
+        # Apply MAPHead
+        return self.map_head(x, train=train)
+    
+    def load_jax_weights(self, params):
+        self.layer_norm.load_jax_weights(params['LayerNorm'])
+        self.map_head.load_jax_weights(params['MAPHead'])
+        self.pos_embed = self._get_param(params['pos_embed'])
+        
+
 
 def regex_match(regex_keys, x):
     return any([re.match(r_key, x) for r_key in regex_keys])
@@ -51,6 +88,7 @@ class ImageTokenizerPt(nn.Module, FromJaxModel):
         self,
         encoder: ModuleSpec,
         use_token_learner: bool = False,
+        token_learner_hid_dim: int = 512,
         num_tokens: int = 8,
         conditioning_type: str = "none",
         obs_stack_keys: Sequence[str] = ("image_.*", "depth_.*"),
@@ -61,6 +99,7 @@ class ImageTokenizerPt(nn.Module, FromJaxModel):
         super().__init__()
         self.encoder = encoder
         self.use_token_learner = use_token_learner
+        self.token_learner_hid_dim = token_learner_hid_dim
         self.num_tokens = num_tokens
         self.conditioning_type = conditioning_type
         self.obs_stack_keys = obs_stack_keys
@@ -70,11 +109,12 @@ class ImageTokenizerPt(nn.Module, FromJaxModel):
 
         self.encoder_def = ModuleSpec.instantiate(self.encoder)()
         if self.use_token_learner:
-            raise NotImplementedError
-            # self.token_learner = TokenLearner(num_tokens=self.num_tokens)
+            self.token_learner = TokenLearnerPt(num_tokens=self.num_tokens, hid_dim=self.token_learner_hid_dim)
         
     def load_jax_weights(self, jax_params):
         self.encoder_def.load_jax_weights(jax_params[list(jax_params.keys())[0]])
+        if self.use_token_learner:
+            self.token_learner.load_jax_weights(jax_params['TokenLearner'])
 
     def extract_inputs(self, keys, inputs, check_spatial=False):
         extracted_outputs = []
@@ -152,67 +192,72 @@ class ImageTokenizerPt(nn.Module, FromJaxModel):
             pad_mask = torch.ones(image_tokens.shape[:-1], dtype=torch.bool, device=image_tokens.device)
         return TokenGroupPt(image_tokens, pad_mask)
 
-# class LanguageTokenizer(nn.Module):
-#     """
-#     Language tokenizer that embeds text input IDs into continuous language embeddings. Supports pre-trained HF models.
+class LanguageTokenizerPt(nn.Module, FromJaxModel):
+    """
+    Language tokenizer that embeds text input IDs into continuous language embeddings. Supports pre-trained HF models.
 
-#      Args:
-#          num_tokens (int): Number of output tokens (not enforced).
-#          encoder (str, optional): Optional HuggingFace AutoModel name for encoding input IDs.
-#          finetune_encoder (bool, optional): Optional finetune last layers of the language model.
-#     """
+    Args:
+        num_tokens (int): Number of output tokens (not enforced).
+        encoder (str, optional): Optional HuggingFace AutoModel name for encoding input IDs.
+        finetune_encoder (bool, optional): Optional finetune last layers of the language model.
+    """
 
-#     encoder: str = None
-#     finetune_encoder: bool = False
-#     proper_pad_mask: bool = True
+    def __init__(self, encoder: Optional[str] = None, finetune_encoder: bool = False, proper_pad_mask: bool = True):
+        super().__init__()
+        # self.num_tokens = num_tokens
+        self.encoder = encoder
+        self.finetune_encoder = finetune_encoder
+        self.proper_pad_mask = proper_pad_mask
+        self.hf_model = None
 
-#     def setup(self):
-#         if self.encoder is not None:
-#             from transformers import AutoConfig, FlaxAutoModel, FlaxT5EncoderModel
+        if self.encoder is not None:
+            from transformers import AutoConfig, AutoModel, T5EncoderModel
 
-#             config = AutoConfig.from_pretrained(self.encoder)
-#             if "t5" in self.encoder:
-#                 self.hf_model = FlaxT5EncoderModel(config).module
-#             else:
-#                 self.hf_model = FlaxAutoModel.from_config(config).module
+            config = AutoConfig.from_pretrained(self.encoder)
+            if "t5" in self.encoder:
+                self.hf_model = T5EncoderModel.from_pretrained(f"google-t5/{self.encoder}")
 
-#     def __call__(
-#         self,
-#         observations,
-#         tasks=None,
-#         train: bool = True,
-#     ):
-#         if "language_instruction" not in tasks:
-#             logging.warning("No language inputs found. Skipping tokenizer entirely.")
-#             assert self.proper_pad_mask, "Cannot skip unless using proper pad mask."
-#             return None
+            else:
+                self.hf_model = AutoModel.from_config(config)
 
-#         if not isinstance(tasks["language_instruction"], (jax.Array, np.ndarray)):
-#             assert (
-#                 self.encoder is not None
-#             ), "Received language tokens but no encoder specified."
-#             tokens = self.hf_model(**tasks["language_instruction"]).last_hidden_state
-#         else:
-#             # add a # tokens dimension to language
-#             if tasks["language_instruction"].ndim == 2:
-#                 tokens = tasks["language_instruction"][:, None, :]
-#             else:
-#                 tokens = tasks["language_instruction"]
+    def load_jax_weights(self, params: None):
+        pass
+    
+    def forward(
+        self,
+        observations: Dict[str, torch.Tensor],
+        tasks: Optional[Dict[str, torch.Tensor]] = None,
+        train: bool = True,
+    ):
+        if tasks is None or "language_instruction" not in tasks:
+            logging.warning("No language inputs found. Skipping tokenizer entirely.")
+            assert self.proper_pad_mask, "Cannot skip unless using proper pad mask."
+            return None
 
-#         if not self.finetune_encoder:
-#             tokens = jax.lax.stop_gradient(tokens)
+        if not isinstance(tasks["language_instruction"], torch.Tensor):
+            assert self.encoder is not None, "Received language tokens but no encoder specified."
+            tokens = self.hf_model(**tasks["language_instruction"]).last_hidden_state
+        else:
+            # add a # tokens dimension to language
+            if tasks["language_instruction"].dim() == 2:
+                tokens = tasks["language_instruction"].unsqueeze(1)
+            else:
+                tokens = tasks["language_instruction"]
 
-#         # TODO: incorporate padding info from language tokens here too
-#         if self.proper_pad_mask:
-#             pad_mask = generate_proper_pad_mask(
-#                 tokens,
-#                 tasks.get("pad_mask_dict", None),
-#                 ("language_instruction",),
-#             )
-#         else:
-#             pad_mask = jnp.ones(tokens.shape[:-1])
+        if not self.finetune_encoder:
+            tokens = tokens.detach()
 
-#         return TokenGroup(tokens, pad_mask)
+        # TODO: incorporate padding info from language tokens here too
+        if self.proper_pad_mask:
+            pad_mask = generate_proper_pad_mask(
+                tokens,
+                tasks.get("pad_mask_dict", None),
+                ("language_instruction",),
+            )
+        else:
+            pad_mask = torch.ones(tokens.shape[:-1], dtype=torch.bool, device=tokens.device)
+
+        return TokenGroupPt(tokens, pad_mask)
 
 
 # class BinTokenizer(nn.Module):
