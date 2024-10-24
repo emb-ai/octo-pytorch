@@ -1,4 +1,5 @@
 import torch
+import torch.nn.functional as F
 from octo.utils.spec import ModuleSpec
 
 import os
@@ -54,53 +55,85 @@ step = checkpointer.latest_step()
 params = checkpointer.restore(step, params_shape)
 
 
-attn = nn_flax.MultiHeadDotProductAttention(
+dense = nn_flax.linear.DenseGeneral(
+        axis=-1,
         dtype=jnp.float32,
-        kernel_init=nn_flax.initializers.xavier_uniform(),
-        broadcast_dropout=False,
-        deterministic=True,
-        dropout_rate=0.1,
-        num_heads=6,
+        param_dtype=jnp.float32,
+        features=(6, 64),
+        use_bias=True,
         )
+
+
 np.random.seed(42)
-x = np.random.randn(10, 100, 384)
-print(x[0, 0, :10])
-att_mask = np.ones((100, 100)) - np.tri(100, 100, k=-1)
-jax_out = attn.apply(
-            {"params": params['octo_transformer']['BlockTransformer_0']['Transformer_0']['encoderblock_0']['MultiHeadDotProductAttention_0']},
-            x,
-            x,
+inputs_q = np.random.randn(1, 2, 384)
+print(inputs_q[0, 0, :10])
+
+params = params['octo_transformer']['BlockTransformer_0']['Transformer_0']['encoderblock_0']['MultiHeadDotProductAttention_0']
+
+jax_out = dense.apply(
+            {"params": params['query']},
+            inputs_q,
         )
-print(jax_out.shape)
-print(jax_out[0, 0])
+# print(jax_out.shape)
+jax_out = jax_out.reshape((1, 2, 384))
+# print(jax_out)
 # exit()
 
 #==============================
 
+q_pt = torch.from_numpy(inputs_q).float()
 
+# w = params['kernel'].copy().transpose((1, 2, 0)).reshape((384, -1))
+w = params['query']['kernel'].copy().transpose((1, 2, 0)).reshape((384, -1))
+w = torch.from_numpy(w).float()
 
-new_config = {
-    'args': [],
-   'kwargs': {'embed_dim':  384, 'num_heads': 6, 'dropout': 0.1, 'batch_first': True, 'add_bias_kv': False},
-   'module': 'octo.model.components.transformer_pt',
-   'name': 'MultiheadAttentionPt'}
-new_config
-
-attn_pt = ModuleSpec.instantiate(new_config)()
-print(attn_pt.state_dict().keys())
-
-attn_pt.load_jax_weights(params['octo_transformer']['BlockTransformer_0']['Transformer_0']['encoderblock_0']['MultiHeadDotProductAttention_0'])
-attn_pt.eval()
-
-x_pt = torch.from_numpy(x).float()
-att_mask_pt = torch.from_numpy(att_mask).float()
-att_mask_pt = att_mask_pt.expand(10, -1, -1)
+b = params['query']['bias'].copy().reshape(384)
+b = torch.from_numpy(b).float()
 
 with torch.no_grad():
-    output_pt, _ = attn_pt(x_pt, x_pt, x_pt, key_padding_mask=None, need_weights=False)
+    output_pt = F.linear(q_pt, w, b)
 
-print(output_pt.shape)
-print(output_pt[0, 0])
+# print(output_pt.shape)
+# print(output_pt)
 
 
-print(np.all(np.isclose(output_pt.cpu().numpy(), jax_out, 0.01, 0.01)))
+print(np.all(np.isclose(output_pt.cpu().numpy(), jax_out, 0.001, 0.001)))
+
+
+#================================
+
+dense = nn_flax.linear.DenseGeneral(
+        features=384,
+        axis=(-2, -1),
+        dtype=jnp.float32,
+        param_dtype=jnp.float32,
+        use_bias=False,
+        )
+
+x = np.random.randn(1, 2, 6, 64)
+
+jax_out = dense.apply(
+            {"params": params['out']},
+            x,
+        )
+
+# print(jax_out.shape)
+# print(jax_out)
+
+x_pt = torch.from_numpy(x).float().reshape((1, 2, -1))
+
+# w = params['kernel'].copy().transpose((1, 2, 0)).reshape((384, -1))
+w = params['out']['kernel'].copy().transpose((2, 0, 1)).reshape((384, -1))
+w = torch.from_numpy(w).float()
+
+b = params['out']['bias'].copy()
+b = torch.from_numpy(b).float()
+
+with torch.no_grad():
+    output_pt = F.linear(x_pt, w)
+
+# print(output_pt.shape)
+# print(output_pt)
+
+
+print(np.all(np.isclose(output_pt.cpu().numpy(), jax_out, 0.001, 0.001)))

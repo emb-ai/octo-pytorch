@@ -108,11 +108,11 @@ class MultiheadAttentionPt(nn.MultiheadAttention, FromJaxModel):
         embed_dim = num_heads * head_dim
         
         q_weight = q_weight.permute((1, 2, 0)).reshape(embed_dim, embed_dim)
-        # q_weight = torch.tensor(params['key']['kernel'].transpose(1, 0, 2).reshape(num_heads * head_dim, -1)).float()
+        
         k_weight = self._get_param(params['key']['kernel']).permute((1, 2, 0)).reshape(embed_dim, embed_dim)
-        # k_weight = torch.tensor(params['value']['kernel'].transpose(1, 0, 2).reshape(num_heads * head_dim, -1)).float()
+       
         v_weight = self._get_param(params['value']['kernel']).permute((1, 2, 0)).reshape(embed_dim, embed_dim)
-        # v_weight = torch.tensor(params['value']['kernel'].transpose(1, 0, 2).reshape(num_heads * head_dim, -1)).float()
+        
         q_bias = self._get_param(params['query']['bias']).reshape(embed_dim)
         k_bias = self._get_param(params['key']['bias']).reshape(embed_dim)
         v_bias = self._get_param(params['value']['bias']).reshape(embed_dim)
@@ -132,7 +132,7 @@ class MultiheadAttentionPt(nn.MultiheadAttention, FromJaxModel):
             self.in_proj_bias = nn.Parameter(bias)
         
         with torch.no_grad():
-            self.out_proj.weight = nn.Parameter(self._get_param(params['out']['kernel']).permute((1, 2, 0)).reshape(embed_dim, embed_dim))
+            self.out_proj.weight = nn.Parameter(self._get_param(params['out']['kernel']).permute((2, 0, 1)).reshape(embed_dim, embed_dim))
             self.out_proj.bias = self._get_param(params['out']['bias'])
 
 class Encoder1DBlockPt(nn.Module, FromJaxModel):
@@ -151,6 +151,7 @@ class Encoder1DBlockPt(nn.Module, FromJaxModel):
         mlp_dim: int,
         num_heads: int,
         dropout_rate: float = 0.1,
+        deterministic: bool = True,
         attention_dropout_rate: float = 0.1
     ):
         super().__init__()
@@ -164,7 +165,7 @@ class Encoder1DBlockPt(nn.Module, FromJaxModel):
         self.self_attention = MultiheadAttentionPt(
             embed_dim=input_dim,
             num_heads=num_heads,
-            dropout=attention_dropout_rate,
+            dropout=0. if deterministic else attention_dropout_rate,
             batch_first=True
         )
         self.dropout1 = nn.Dropout(dropout_rate)
@@ -197,9 +198,10 @@ class Encoder1DBlockPt(nn.Module, FromJaxModel):
 
         # Attention block.
         x = self.layer_norm1(inputs)
-        attention_mask = attention_mask.to(torch.bool)
-        # x, _ = self.self_attention(x, x, x, key_padding_mask=~attention_mask, need_weights=False)
-        x, _ = self.self_attention(x, x, x, key_padding_mask=None, need_weights=False)
+        if attention_mask is not None:
+            attention_mask = attention_mask.to(torch.bool)
+            # attention_mask = ~attention_mask
+        x, _ = self.self_attention(x, x, x, attn_mask=attention_mask, need_weights=False)
         x = self.dropout1(x) if not deterministic else x
         x = x + inputs
 
@@ -210,3 +212,83 @@ class Encoder1DBlockPt(nn.Module, FromJaxModel):
         return x + y
     
 
+class TransformerPt(nn.Module, FromJaxModel):
+    """Transformer Model Encoder for sequence to sequence translation.
+
+    Attributes:
+      num_layers: number of layers
+      mlp_dim: dimension of the mlp on top of attention block
+      num_attention_heads: Number of heads in nn.MultiheadAttention
+      dropout_rate: dropout rate.
+      attention_dropout_rate: dropout rate in self attention.
+    """
+
+    def __init__(
+        self,
+        d_model: int,
+        num_layers: int,
+        mlp_dim: int,
+        num_attention_heads: int,
+        dropout_rate: float = 0.1,
+        attention_dropout_rate: float = 0.1,
+        add_position_embedding: bool = False
+    ):
+        super().__init__()
+        self.d_model = d_model
+        self.num_layers = num_layers
+        self.mlp_dim = mlp_dim
+        self.num_attention_heads = num_attention_heads
+        self.dropout_rate = dropout_rate
+        self.attention_dropout_rate = attention_dropout_rate
+        self.add_position_embedding = add_position_embedding
+
+        if self.add_position_embedding:
+            self.position_embedding = AddPositionEmbsPt(
+                hid_dim=self.d_model
+            )
+        self.dropout = nn.Dropout(dropout_rate)
+
+        self.encoder_blocks = nn.ModuleList([
+            Encoder1DBlockPt(
+                input_dim=self.d_model,
+                mlp_dim=self.mlp_dim,
+                num_heads=self.num_attention_heads,
+                dropout_rate=self.dropout_rate,
+                attention_dropout_rate=self.attention_dropout_rate,
+            ) for _ in range(self.num_layers)
+        ])
+        self.layer_norm = LayerNormPt(self.d_model)
+
+    def forward(self, x: torch.Tensor, attention_mask: torch.Tensor, train: bool = True) -> torch.Tensor:
+        """Applies Transformer model on the inputs.
+
+        Args:
+          x: Inputs to the layer.
+          attention_mask: Mask for attention mechanism.
+          train: Set to `True` when training.
+
+        Returns:
+          output of a transformer encoder.
+        """
+        assert x.dim() == 3  # (batch, len, emb)
+
+        if self.add_position_embedding:
+            x = self.position_embedding(x)
+            x = self.dropout(x) if train else x
+
+        # Input Encoder
+        for encoder_block in self.encoder_blocks:
+            x = encoder_block(x, attention_mask, deterministic=not train)
+        encoded = self.layer_norm(x)
+
+        return encoded
+
+    def load_jax_weights(self, jax_params):
+        if self.add_position_embedding:
+            self.position_embedding.load_jax_weights(jax_params['position_embedding'])
+            
+        for i in range(len(self.encoder_blocks)):
+            self.encoder_blocks[i].load_jax_weights(jax_params[f'encoderblock_{i}'])
+        
+        self.layer_norm.load_jax_weights(jax_params['encoder_norm'])
+        
