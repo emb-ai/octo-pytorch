@@ -5,7 +5,7 @@ import jax.numpy as jnp
 from octo.utils.typing import Sequence
 
 import torch
-from dataclasses import dataclass 
+from dataclasses import dataclass, asdict
 
 @flax.struct.dataclass
 class TokenGroup:
@@ -68,3 +68,8 @@ class TokenGroupPt:
             tokens=self.tokens.detach().cpu().numpy(),
             mask=self.mask.detach().cpu().numpy()
         )
+    
+    def to(self, device):
+        self.tokens = self.tokens.to(device)
+        self.mask = self.mask.to(device)
+        return self
