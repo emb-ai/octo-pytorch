@@ -105,8 +105,8 @@ class TokenMetadataPt:
 
 
 def split_tokens(ary: torch.tensor, n_tokens_per_group: Sequence[int], axis: int):
-    cumsum = np.cumsum(n_tokens_per_group)
-    return torch.split(ary, cumsum.tolist(), dim=axis)
+    # cumsum = np.cumsum(n_tokens_per_group)
+    return torch.split(ary, n_tokens_per_group, dim=axis)
 
 
 class BlockTransformerPt(nn.Module, FromJaxModel):
@@ -159,8 +159,11 @@ class BlockTransformerPt(nn.Module, FromJaxModel):
         assert all([group.tokens.shape[-1] == token_dim for group in timestep_groups])
 
         input_tokens = self.assemble_input_tokens(prefix_groups, timestep_groups)
+        
         attention_mask = self.generate_attention_mask(prefix_groups, timestep_groups)
-
+        attention_mask = attention_mask.repeat(1, self.transformer_kwargs['num_attention_heads'], 1, 1)
+        attention_mask = attention_mask.reshape((-1, attention_mask.shape[2], attention_mask.shape[3]))
+        attention_mask = ~attention_mask
         output = self.transformer(input_tokens, attention_mask, train=train)
 
         all_prefix_outputs, all_timestep_outputs = self.split_output_tokens(output, prefix_groups, timestep_groups)
