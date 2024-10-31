@@ -98,11 +98,12 @@ class SmallStemPt(nn.Module, FromJaxModel):
         self.use_film = use_film
         self.patch_size = patch_size
         self.img_norm_type = img_norm_type
+        self.num_features = num_features
 
         self.layers = nn.ModuleList()
         for n, (kernel_size, stride, feature, pad) in enumerate(zip(kernel_sizes, strides, features, padding)):
             self.layers.append(nn.Sequential(
-                StdConvPt(3 if n == 0 else features[n-1], feature, kernel_size=kernel_size, stride=stride, padding=pad),
+                StdConvPt(6 if n == 0 else features[n-1], feature, kernel_size=kernel_size, stride=stride, padding=pad),
                 GroupNormPt(32, feature),
                 nn.ReLU()
             ))
