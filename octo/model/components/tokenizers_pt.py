@@ -111,6 +111,8 @@ class ImageTokenizerPt(nn.Module, FromJaxModel):
         if self.use_token_learner:
             self.token_learner = TokenLearnerPt(num_tokens=self.num_tokens, hid_dim=self.token_learner_hid_dim)
         
+        self.output_dim = self.encoder_def.num_features
+        
     def load_jax_weights(self, jax_params):
         self.encoder_def.load_jax_weights(jax_params[list(jax_params.keys())[0]])
         if self.use_token_learner:
@@ -209,7 +211,6 @@ class LanguageTokenizerPt(nn.Module, FromJaxModel):
         self.finetune_encoder = finetune_encoder
         self.proper_pad_mask = proper_pad_mask
         self.hf_model = None
-
         if self.encoder is not None:
             from transformers import AutoConfig, AutoModel, T5EncoderModel
 
@@ -219,6 +220,7 @@ class LanguageTokenizerPt(nn.Module, FromJaxModel):
 
             else:
                 self.hf_model = AutoModel.from_config(config)
+        self.output_dim = self.hf_model.config.d_model
 
     def load_jax_weights(self, params: None):
         pass
