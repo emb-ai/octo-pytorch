@@ -117,6 +117,7 @@ class BlockTransformerPt(nn.Module, FromJaxModel):
         self.enforce_causal = enforce_causal
         self.use_correct_attention = use_correct_attention
         self.transformer = TransformerPt(**self.transformer_kwargs)
+        self.attention_mask = None
 
     def load_jax_weights(self, jax_params=None):
         self.transformer.load_jax_weights(jax_params['Transformer_0'])
@@ -160,11 +161,13 @@ class BlockTransformerPt(nn.Module, FromJaxModel):
 
         input_tokens = self.assemble_input_tokens(prefix_groups, timestep_groups)
         
-        attention_mask = self.generate_attention_mask(prefix_groups, timestep_groups)
-        attention_mask = attention_mask.repeat(1, self.transformer_kwargs['num_attention_heads'], 1, 1)
-        attention_mask = attention_mask.reshape((-1, attention_mask.shape[2], attention_mask.shape[3]))
-        attention_mask = ~attention_mask
-        output = self.transformer(input_tokens, attention_mask, train=train)
+        if not self.attention_mask:
+            attention_mask = self.generate_attention_mask(prefix_groups, timestep_groups)
+            attention_mask = attention_mask.repeat(1, self.transformer_kwargs['num_attention_heads'], 1, 1)
+            attention_mask = attention_mask.reshape((-1, attention_mask.shape[2], attention_mask.shape[3]))
+            attention_mask = ~attention_mask
+            self.attention_mask = attention_mask.detach()
+        output = self.transformer(input_tokens, self.attention_mask, train=train)
 
         all_prefix_outputs, all_timestep_outputs = self.split_output_tokens(output, prefix_groups, timestep_groups)
         return all_prefix_outputs, all_timestep_outputs

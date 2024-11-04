@@ -76,7 +76,7 @@ print(jax_out.transpose((0, 3, 1, 2))[0, 0])
 
 
 new_config = {
-    'args': [3, 32, 3, 2, 1],
+    'args': [6, 32, 3, 2, 1],
    'kwargs': {},
    'module': 'octo.model.components.vit_encoders_pt',
    'name': 'StdConvPt'}

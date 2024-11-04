@@ -17,13 +17,26 @@ from octo.utils.spec import ModuleSpec
 
 
 class FromJaxModel(ABC):
+    STRICT_SHAPES = True
 
     @abstractmethod
     def load_jax_weights(self, jax_params=None):
         pass
     
-    def _get_param(self, jax_conv_params):
-        weight = torch.from_numpy(jax_conv_params.copy()).float()
+    def assign_new_value(self, name: str, parameter: nn.Parameter, module: nn.Module = None):
+        old_values = getattr(self, name, None) if module is None else getattr(module, name, None)
+        assert old_values is not None, f"No such parameter: {name}"
+        
+        if self.STRICT_SHAPES:
+            assert old_values.shape == parameter.shape, f"New value of '{name}' has shape {parameter.shape}, but {old_values.shape} expected"
+        
+        if module:
+            module.register_parameter(name, nn.Parameter(parameter))
+        else:
+            self.register_parameter(name, nn.Parameter(parameter))
+    
+    def _get_param(self, jax_params):
+        weight = torch.from_numpy(jax_params.copy()).float()
         return nn.Parameter(weight)
 
     def _get_conv_params(self, jax_conv_params):
@@ -31,9 +44,9 @@ class FromJaxModel(ABC):
         bias = torch.from_numpy(jax_conv_params['bias'].copy()).float()
         return nn.Parameter(weight), nn.Parameter(bias)
     
-    def _get_linear_params(self, jax_conv_params):
-        weight = torch.from_numpy(jax_conv_params['kernel'].transpose((1, 0)).copy()).float()
-        bias = torch.from_numpy(jax_conv_params['bias'].copy()).float()
+    def _get_linear_params(self, jax_linear_params):
+        weight = torch.from_numpy(jax_linear_params['kernel'].transpose((1, 0)).copy()).float()
+        bias = torch.from_numpy(jax_linear_params['bias'].copy()).float()
         return nn.Parameter(weight), nn.Parameter(bias)
     
     
@@ -70,36 +83,39 @@ class FromJaxModel(ABC):
 class LinearPt(nn.Linear, FromJaxModel):
     """Linear Layer"""
     def load_jax_weights(self, jax_params=None):
-        with torch.no_grad():
-            self.weight, self.bias = self._get_linear_params(jax_params)
+        weight, bias = self._get_linear_params(jax_params)
+        self.assign_new_value('weight', weight)
+        self.assign_new_value('bias', bias)
 
 class ConvPt(nn.Conv2d, FromJaxModel):
     """Ordinary convolution"""
     def load_jax_weights(self, jax_params=None):
-        with torch.no_grad():
-            self.weight, self.bias = self._get_conv_params(jax_params)
+        weight, bias = self._get_conv_params(jax_params)
+        self.assign_new_value('weight', weight)
+        self.assign_new_value('bias', bias)
 
 class LayerNormPt(nn.LayerNorm, FromJaxModel):
     def load_jax_weights(self, jax_params=None):
         weight = torch.from_numpy(jax_params['scale'].copy()).float()
         bias = torch.from_numpy(jax_params['bias'].copy()).float()
-        with torch.no_grad():
-            self.weight, self.bias = nn.Parameter(weight), nn.Parameter(bias)
+        self.assign_new_value('weight', weight)
+        self.assign_new_value('bias', bias)
 
 class GroupNormPt(nn.GroupNorm, FromJaxModel):
     def load_jax_weights(self, jax_params=None):
         weight = torch.from_numpy(jax_params['scale'].copy()).float()
         bias = torch.from_numpy(jax_params['bias'].copy()).float()
-        with torch.no_grad():
-            self.weight, self.bias = nn.Parameter(weight), nn.Parameter(bias)
+        self.assign_new_value('weight', weight)
+        self.assign_new_value('bias', bias)
         
 
 class StdConvPt(nn.Conv2d, FromJaxModel):
     """Convolution with weight standardization."""
     
     def load_jax_weights(self, jax_params=None):
-        with torch.no_grad():
-            self.weight, self.bias = self._get_conv_params(jax_params)
+        weight, bias = self._get_conv_params(jax_params)
+        self.assign_new_value('weight', weight)
+        self.assign_new_value('bias', bias)
 
     def forward(self, x):
         w = self.weight
@@ -111,5 +127,5 @@ class LayerNormPt(nn.LayerNorm, FromJaxModel):
     def load_jax_weights(self, jax_params=None):
         weight = torch.from_numpy(jax_params['scale'].copy()).float()
         bias = torch.from_numpy(jax_params['bias'].copy()).float()
-        with torch.no_grad():
-            self.weight, self.bias = nn.Parameter(weight), nn.Parameter(bias)
+        self.assign_new_value('weight', weight)
+        self.assign_new_value('bias', bias)

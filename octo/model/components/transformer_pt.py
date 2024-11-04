@@ -6,7 +6,8 @@ import torch.nn as nn
 import torch.nn.functional as F 
 
 from octo.model.components.base import TokenGroup
-from octo.utils.typing import Dtype, PRNGKey, Shape, Union
+from octo.utils.typing import Dtype, PRNGKey, Shape, Union, Tuple
+
 from octo.model.components.jax_pt import FromJaxModel, LinearPt, LayerNormPt
 
 class MAPHeadPt(nn.Module, FromJaxModel):
@@ -21,20 +22,19 @@ class AddPositionEmbsPt(nn.Module, FromJaxModel):
     """Adds learned positional embeddings to the inputs.
 
     Attributes:
-      posemb_init: positional embedding initializer.
+      TODO
     """
 
-    def __init__(self, hid_dim=512, max_len=5000):
+    def __init__(self, emb_shape: Tuple, history_dim = None):
         super().__init__()
-        self.max_len = max_len
-        self.hid_dim = hid_dim
-        pos_embed = torch.randn(max_len, self.hid_dim) * 0.02
-        self.register_parameter('pos_embed', pos_embed) # trainable
+        self.history_dim = history_dim
+        pos_embed = torch.randn(*emb_shape) * 0.02
+        self.pos_embed = nn.Parameter(pos_embed) # trainable
 
     def load_jax_weights(self, jax_params):
-        with torch.no_grad():
-            self.pos_embed = self._get_param(jax_params['pos_embedding'][0])
-        self.max_len, self.hid_dim = self.pos_embed.shape
+        pos_embed = self._get_param(jax_params[0])
+        self.assign_new_value('pos_embed', pos_embed)
+        
     
     def forward(self, inputs: torch.Tensor) -> torch.Tensor:
         """Applies the AddPositionEmbs module.
@@ -46,6 +46,20 @@ class AddPositionEmbsPt(nn.Module, FromJaxModel):
           Output tensor with shape `(bs, timesteps, in_dim)`.
         """
         # inputs.shape is (batch_size, seq_len, emb_dim).
+        bs = inputs.shape[0]
+        # assert inputs[0].shape ==  self.pos_embed.shape 
+        
+        pe = self.pos_embed
+        if self.history_dim is not None:
+            history_len = inputs[0].shape[self.history_dim]
+            pe = pe[(slice(None),) * self.history_dim + (slice(0, history_len),)]
+        else:
+            assert pe.shape == inputs[0].shape
+        
+        pe = pe.unsqueeze(0).expand(bs, *pe.shape)
+        return inputs + pe
+        
+        
         assert inputs.dim() == 3, (
             "Number of dimensions should be 3," f" but it is: {inputs.dim()}"
         )
@@ -118,22 +132,21 @@ class MultiheadAttentionPt(nn.MultiheadAttention, FromJaxModel):
         v_bias = self._get_param(params['value']['bias']).reshape(embed_dim)
                 
         if not self._qkv_same_embed_dim:
-            with torch.no_grad():
-                self.q_proj_weight = nn.Parameter(q_weight)
-                self.k_proj_weight = nn.Parameter(k_weight)
-                self.v_proj_weight = nn.Parameter(v_weight)
+            self.assign_new_value('q_proj_weight', q_weight)
+            self.assign_new_value('k_proj_weight', k_weight)
+            self.assign_new_value('v_proj_weight', v_weight)
         else:
             in_proj = torch.cat((q_weight, k_weight, v_weight), dim=0)
-            with torch.no_grad():
-                self.in_proj_weight = nn.Parameter(in_proj)
+            self.assign_new_value('in_proj_weight', in_proj)
                 
         bias = torch.cat((q_bias, k_bias, v_bias), dim=0)
-        with torch.no_grad():
-            self.in_proj_bias = nn.Parameter(bias)
+        self.assign_new_value('in_proj_bias', bias)
         
         with torch.no_grad():
-            self.out_proj.weight = nn.Parameter(self._get_param(params['out']['kernel']).permute((2, 0, 1)).reshape(embed_dim, embed_dim))
-            self.out_proj.bias = self._get_param(params['out']['bias'])
+            out_proj_weight = self._get_param(params['out']['kernel']).permute((2, 0, 1)).reshape(embed_dim, embed_dim)
+            out_proj_bias = self._get_param(params['out']['bias'])
+            self.assign_new_value('weight', out_proj_weight, self.out_proj)
+            self.assign_new_value('bias', out_proj_bias, self.out_proj)
 
 class Encoder1DBlockPt(nn.Module, FromJaxModel):
     """Transformer encoder layer.
@@ -225,7 +238,7 @@ class TransformerPt(nn.Module, FromJaxModel):
 
     def __init__(
         self,
-        d_model: int,
+        token_embedding_size: int,
         num_layers: int,
         mlp_dim: int,
         num_attention_heads: int,
@@ -234,7 +247,7 @@ class TransformerPt(nn.Module, FromJaxModel):
         add_position_embedding: bool = False
     ):
         super().__init__()
-        self.d_model = d_model
+        self.token_embedding_size = token_embedding_size
         self.num_layers = num_layers
         self.mlp_dim = mlp_dim
         self.num_attention_heads = num_attention_heads
@@ -244,20 +257,20 @@ class TransformerPt(nn.Module, FromJaxModel):
 
         if self.add_position_embedding:
             self.position_embedding = AddPositionEmbsPt(
-                hid_dim=self.d_model
+                hid_dim=self.token_embedding_size
             )
         self.dropout = nn.Dropout(dropout_rate)
 
         self.encoder_blocks = nn.ModuleList([
             Encoder1DBlockPt(
-                input_dim=self.d_model,
+                input_dim=self.token_embedding_size,
                 mlp_dim=self.mlp_dim,
                 num_heads=self.num_attention_heads,
                 dropout_rate=self.dropout_rate,
                 attention_dropout_rate=self.attention_dropout_rate,
             ) for _ in range(self.num_layers)
         ])
-        self.layer_norm = LayerNormPt(self.d_model)
+        self.layer_norm = LayerNormPt(self.token_embedding_size)
 
     def forward(self, x: torch.Tensor, attention_mask: torch.Tensor, train: bool = True) -> torch.Tensor:
         """Applies Transformer model on the inputs.
@@ -319,49 +332,49 @@ def common_transformer_sizes_pt(transformer_size: str) -> (int, dict):
 
     TRANSFORMER_SIZES = {
         "dummy": dict(
-            d_model=256,
+            token_embedding_size=256,
             num_layers=1,
             mlp_dim=256,
             num_attention_heads=2,
             dropout_rate=0.1,
         ),
         "vanilla": dict(
-            d_model=256,
+            token_embedding_size=256,
             num_layers=4,
             mlp_dim=1024,
             num_attention_heads=8,
             dropout_rate=0.1,
         ),
         "vit_t": dict(
-            d_model=192,
+            token_embedding_size=192,
             num_layers=12,
             mlp_dim=768,
             num_attention_heads=3,
             dropout_rate=0.0,
         ),
         "vit_s": dict(
-            d_model=384,
+            token_embedding_size=384,
             num_layers=12,
             mlp_dim=1536,
             num_attention_heads=6,
             dropout_rate=0.0,
         ),
         "vit_b": dict(
-            d_model=768,
+            token_embedding_size=768,
             num_layers=12,
             mlp_dim=3072,
             num_attention_heads=12,
             dropout_rate=0.0,
         ),
         "vit_l": dict(
-            d_model=1024,
+            token_embedding_size=1024,
             num_layers=24,
             mlp_dim=4096,
             num_attention_heads=16,
             dropout_rate=0.1,
         ),
         "vit_h": dict(
-            d_model=1280,
+            token_embedding_size=1280,
             num_layers=32,
             mlp_dim=5120,
             num_attention_heads=16,

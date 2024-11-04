@@ -124,9 +124,10 @@ def test_transformer(params, config):
     )
 
     x = np.random.randn(10, 100, 384)
-    att_mask = np.random.randn(100, 100) > 0.5
+    att_mask = np.random.randn(10, 100, 100) > 0.5
 
-    att_mask = np.tile(att_mask, (10, config['model']['transformer_kwargs']['num_attention_heads'], 1, 1)) 
+    # att_mask = np.tile(att_mask, (10, config['model']['transformer_kwargs']['num_attention_heads'], 1, 1)) 
+    att_mask = np.tile(att_mask, (config['model']['transformer_kwargs']['num_attention_heads'], 1, 1, 1)).transpose((1, 0, 2, 3))
     jax_out = transformer.apply(
                 {"params": params['octo_transformer']['BlockTransformer_0']['Transformer_0']},
                 x,
@@ -139,7 +140,7 @@ def test_transformer(params, config):
     
     new_config = {
         'args': [],
-        'kwargs': {'d_model':  384, 'num_layers': 12, 'mlp_dim': 1536, 'num_attention_heads':6},
+        'kwargs': {'token_embedding_size':  384, 'num_layers': 12, 'mlp_dim': 1536, 'num_attention_heads':6},
         'module': 'octo.model.components.transformer_pt',
         'name': 'TransformerPt'
         }
@@ -149,7 +150,8 @@ def test_transformer(params, config):
     transformer_pt.eval()
 
     x_pt = torch.from_numpy(x).float()
-    att_mask_pt = torch.from_numpy(att_mask[0, 0]).to(torch.bool)
+    att_mask_pt = torch.from_numpy(att_mask).reshape((-1, att_mask.shape[2], att_mask.shape[3])).to(torch.bool)
+    
     att_mask_pt = ~att_mask_pt
     
     with torch.no_grad():

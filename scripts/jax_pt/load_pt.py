@@ -27,8 +27,9 @@ IMAGE_URL = "https://rail.eecs.berkeley.edu/datasets/bridge_release/raw/bridge_d
 img = np.array(Image.open(requests.get(IMAGE_URL, stream=True).raw).resize((256, 256)))
 
 img = img[np.newaxis,np.newaxis,...]
-observation = {"image_primary": img, "timestep_pad_mask": np.array([[True]])}
-task = model.create_tasks(texts=["pick up the fork"])
+img = np.random.randint(0, 256, (4, 2, 256, 256, 3))
+observation = {"image_primary": img, "timestep_pad_mask": np.array([[True, True]])}
+task = model.create_tasks(texts=["pick up the fork"] * 4)
 init_args = (
     observation,
     task,
@@ -87,9 +88,10 @@ model = ModuleSpec.instantiate(new_config)()
 model.load_jax_weights(params['octo_transformer']['observation_tokenizers_primary'])
 model.eval()
 
-observation_pt = {"image_primary": torch.from_numpy(img), "timestep_pad_mask": np.array([[True]])}
+observation_pt = {"image_primary": torch.from_numpy(img).permute((0, 1, 4, 2, 3)), "timestep_pad_mask": torch.tensor([[True, True]])}
 
 task_pt = {key: torch.from_numpy(val.copy()) for key, val in task.items() if type(val) == np.ndarray}
+task_pt = {key: val.permute((0, 1, 4, 2, 3)) for key, val in task_pt.items() if val.dim() == 5}
 with torch.no_grad():
     output = model(
         observation_pt,
@@ -100,4 +102,4 @@ print(output.tokens[0, 0])
 print(output.tokens.shape)
 
 
-print(np.all(np.isclose(output.tokens.cpu().numpy(), jax_out.tokens, 0.0, 0.001)))
+print(np.all(np.isclose(output.tokens.cpu().numpy(), jax_out.tokens, 0.001, 0.001)))

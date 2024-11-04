@@ -159,10 +159,10 @@ class ImageTokenizerPt(nn.Module, FromJaxModel):
                 )
             task_inputs = self.extract_inputs(task_stack_keys, tasks, check_spatial=True)
             task_inputs = task_inputs.unsqueeze(1).repeat(1, enc_inputs.shape[1], 1, 1, 1)
-            enc_inputs = torch.cat([enc_inputs, task_inputs], dim=-1)
-        b, t, h, w, c = enc_inputs.shape
-        enc_inputs = enc_inputs.view(b * t, h, w, c)
-        enc_inputs = enc_inputs.permute((0, 3, 1, 2))
+            enc_inputs = torch.cat([enc_inputs, task_inputs], dim=2)
+        b, t, c, h, w = enc_inputs.shape
+        enc_inputs = enc_inputs.view(b * t, c, h, w)
+        # enc_inputs = enc_inputs.permute((0, 3, 1, 2))
         
         # extract non-spatial FiLM inputs
         encoder_input_kwargs = {}

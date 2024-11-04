@@ -1,4 +1,4 @@
-from typing import Any, Mapping, Sequence, Union
+from typing import Any, Mapping, Sequence, Union, Tuple
 
 import jax
 

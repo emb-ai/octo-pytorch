@@ -77,7 +77,12 @@ class OctoTransformerPt(nn.Module, FromJaxModel):
                 token_embedding_size: int,
                 max_horizon: int,
                 repeat_task_tokens: bool,
-                use_correct_attention: bool = False
+                use_correct_attention: bool = False,
+                num_tokens_dict = {
+                    'primary': 256,
+                    'wrist': 64,
+                    'task_language_pos_embedding': 16
+                },
                  ):
         super().__init__()
         self.task_tokenizers = nn.ModuleDict(task_tokenizers)
@@ -107,18 +112,19 @@ class OctoTransformerPt(nn.Module, FromJaxModel):
         })
         
         self.pos_embeddings = nn.ModuleDict({
-            f"task_{name}_pos_embedding": AddPositionEmbsPt(hid_dim=self.token_embedding_size)
+            f"task_{name}_pos_embedding": AddPositionEmbsPt((num_tokens_dict[name], self.token_embedding_size))
             for name, tok in self.task_tokenizers.items()
         })
+        
         self.pos_embeddings.update(
             nn.ModuleDict({
-                f"obs_{name}_pos_embedding": AddPositionEmbsPt(hid_dim=self.token_embedding_size)
+                f"obs_{name}_pos_embedding": AddPositionEmbsPt((10, num_tokens_dict[name], self.token_embedding_size), history_dim=0)
                 for name, tok in self.observation_tokenizers.items()
             })
         )
         self.pos_embeddings.update(
             nn.ModuleDict({
-                f"readout_{readout_name}_pos_embedding": AddPositionEmbsPt(hid_dim=self.token_embedding_size)
+                f"readout_{readout_name}_pos_embedding": AddPositionEmbsPt((10, 1, self.token_embedding_size), history_dim=0)
                 for readout_name in self.readouts
             })
         )
