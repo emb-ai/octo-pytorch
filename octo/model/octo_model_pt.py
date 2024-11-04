@@ -1,0 +1,325 @@
+from functools import partial
+import json
+import logging
+from typing import Any, Optional, Tuple, Dict
+
+import torch
+from torch._prims_common import DeviceLikeType
+
+from torchvision.transforms import ToTensor
+import numpy as np
+import tensorflow as tf
+import flax
+
+from octo.data.utils.data_utils import NormalizationType
+from octo.data.utils.text_processing import TextProcessor
+from octo.model.components.action_heads import ActionHead
+from octo.model.octo_module_pt import OctoModulePt
+from octo.utils.spec import ModuleSpec
+from octo.utils.typing import Sequence
+
+class OctoModelPt:
+    """Recommended way of interacting with Octo models.
+
+    TODO
+
+    Usage for finetuning:
+
+       TODO
+
+    Usage for pretraining:
+
+       TODO
+
+    See full usage examples in train.py and finetune.py.
+
+    """
+    def __init__(
+        self,
+        module: OctoModulePt,
+        text_processor: TextProcessor,
+        config,
+        example_batch,
+        dataset_statistics
+    ):
+        self.module = module
+        self.text_processor = text_processor
+        self.config = config
+        self.example_batch = example_batch
+        self.dataset_statistics = dataset_statistics
+        self.to_tensor = ToTensor()
+
+    
+    def create_tasks(
+        self, 
+        goals: Optional[Dict] = None, 
+        texts: Optional[Sequence[str]] = None, 
+        device: Optional[DeviceLikeType] = None
+    ):
+        """Creates tasks dict from goals and texts.
+
+        Args:
+            goals: if not None, dict of arrays with shape (batch_size, *)
+            texts: if not None, list of texts of length batch_size
+
+        Omit images to run the language-conditioned model, and omit texts to run the
+        goal-conditioned model.
+        """
+        assert goals is not None or texts is not None
+        tasks = {"pad_mask_dict": {}}
+        if goals is not None:
+            goals_pt = {
+                key: torch.stack([
+                    self.to_tensor(goal_i).to(device) for goal_i in goal
+                ], dim=0)  for key, goal in goals.item()
+            }
+            
+            tasks.update(goals_pt)
+            tasks["pad_mask_dict"].update(
+                {k: torch.ones(v.shape[:1], dtype=torch.bool, device=device) for k, v in goals.items()}
+            )
+        else:
+            batch_size = len(texts)
+            tasks.update(
+                {
+                    k: torch.zeros((batch_size, *v.shape[1:]), dtype=v.dtype, device=device)
+                    for k, v in self.example_batch["task"].items()
+                    if k not in ("pad_mask_dict", "language_instruction")
+                }
+            )
+            tasks["pad_mask_dict"].update(
+                {
+                    k: torch.zeros(batch_size, dtype=torch.bool, device=device)
+                    for k in tasks.keys()
+                    if k != "pad_mask_dict"
+                }
+            )
+
+        if texts is not None:
+            assert self.text_processor is not None
+            tasks["language_instruction"] = texts
+            tasks["pad_mask_dict"]["language_instruction"] = torch.ones(
+                len(texts), dtype=torch.bool, device=device
+            )
+        else:
+            batch_size = goals[0].shape[0]
+            tasks["language_instruction"] = [""] * batch_size
+            tasks["pad_mask_dict"]["language_instruction"] = np.zeros(
+                batch_size, dtype=bool
+            )
+
+        if self.text_processor is not None:
+            tasks["language_instruction"] = _np2pt(self.text_processor.encode(
+                tasks["language_instruction"]
+            ), device)
+        else:
+            del tasks["language_instruction"]
+
+        _verify_shapes(tasks, "tasks", self.example_batch["task"], starting_dim=1)
+        return tasks
+    
+    def load_np_example_batch(self, checkpoint_path):
+        if checkpoint_path.startswith("hf://"):
+            checkpoint_path = _download_from_huggingface(
+                checkpoint_path.removeprefix("hf://")
+            )
+        with tf.io.gfile.GFile(
+            tf.io.gfile.join(checkpoint_path, "config.json"), "r"
+        ) as f:
+            config = json.load(f)
+        # shim to support old configs
+        if "pred_horizon" in config["model"]["heads"]["action"]["kwargs"]:
+            config["model"]["heads"]["action"]["kwargs"]["action_horizon"] = config[
+                "model"
+            ]["heads"]["action"]["kwargs"].pop("pred_horizon")
+            
+        # load example batch
+        with tf.io.gfile.GFile(
+            tf.io.gfile.join(checkpoint_path, "example_batch.msgpack"), "rb"
+        ) as f:
+            example_batch = flax.serialization.msgpack_restore(f.read())
+        # shim for migrating from "tasks" to "task"
+        if "tasks" in example_batch:
+            example_batch["task"] = example_batch.pop("tasks")
+        # shim for old checkpoints
+        if "timestep_pad_mask" not in example_batch["observation"]:
+            example_batch["observation"]["timestep_pad_mask"] = example_batch[
+                "observation"
+            ]["pad_mask"]
+        self.example_batch =  _np2pt(example_batch)
+        return self.example_batch
+        
+
+    def run_transformer(
+        self,
+        observations: dict,
+        tasks: dict,
+        timestep_pad_mask: torch.tensor,
+        train: bool = False,
+    ):
+        """Runs the transformer, but does shape checking on the inputs.
+
+        Args:
+            observations: dictionary of arrays of shape (batch_size, window_size, *shape).
+                Shape must be consistent with self.example_batch["observation"]
+            tasks: dict of tasks of shape (batch_size, *shape)
+                Shape must be consistent with self.example_batch["task"]
+            timestep_pad_mask: (batch_size, window_size) Boolean mask that is False when the timestep corresponds to padding
+            train: whether to run in train mode
+        """
+        _verify_shapes(
+            observations,
+            "observations",
+            self.example_batch["observation"],
+            starting_dim=2,
+        )
+        _verify_shapes(tasks, "tasks", self.example_batch["task"], starting_dim=1)
+
+        return self.module(
+            observations,
+            tasks,
+            timestep_pad_mask,
+            train=train,
+            method="octo_transformer",
+        )
+    
+    def sample_actions(
+        self
+    ):
+        """Samples actions from the model. See `action_heads.py` for more info.
+
+        Args:
+            TODO
+        Returns:
+            TODO
+        """
+        pass
+
+    @classmethod
+    def load_pretrained(
+        cls,
+        checkpoint_path: str,
+        step: Optional[int] = None,
+    ) -> "OctoModel":
+        """Loads a model from a checkpoint that was saved via `save_pretrained`.
+
+        Args:
+            checkpoint_path (str): A path to either a directory of checkpoints or a single checkpoint.
+            step (int, optional): If multiple checkpoints are present, which one to load. Defaults to the latest.
+        """
+        pass
+
+    def save_pretrained(
+        self,
+    ):
+        pass
+    
+    @classmethod
+    def from_config(
+        cls,
+    ):
+        """Initializes a model with a fresh set of weights from a given config + example_batch.
+
+        Args:
+            config (Dict[str, Any]): Config dict. The only required key is "model", but other configuration
+                may be saved for posterity.
+            example_batch (Dict[str, Any]): Example batch.
+            text_processor (Any, optional): Preprocessor for text inputs.
+            verbose (bool, optional): Whether to print out a summary of the model.
+            rng (Optional[PRNGKey], optional): RNG key for initializing the model.
+            dataset_statistics (Optional[Dict[str, Any]], optional): Dataset statistics.
+        """
+        pass
+
+    def get_pretty_spec(self):
+        """Brief summary of the model's expected inputs and outputs."""
+        # TODO: generalize this to print out proprio when it is being tokenized
+        pass
+
+def _np2pt(data, device=None):
+    if isinstance(data, dict):
+        return {key: _np2pt(val, device) for key, val in data.items()}
+    elif isinstance(data, np.ndarray):
+        if len(data.shape) == 4 and data.dtype == np.uint8:
+            data = data.transpose((0, 3, 1, 2)) #NHWC -> NCHW
+        elif len(data.shape) == 5 and data.dtype == np.uint8:
+            data = data.transpose((0, 1, 4, 2, 3)) #NTHWC -> NTCHW
+        t = torch.tensor(data, device=device)
+        return t
+
+def _flatten_dict(d, parent_key: str = '', sep: str ='.'):
+    items = {}
+    for k, v in d.items():
+        # new_key = parent_key + sep + k if parent_key else k
+        new_key = (*parent_key, k) if parent_key else (k,)
+        if isinstance(v, dict):
+            items.update(_flatten_dict(v, new_key, sep=sep).items())
+        else:
+            items[new_key] = v
+    return items
+
+def _verify_shapes(
+    data,
+    name: str,
+    example_data,
+    starting_dim: int = 0,
+    strict: bool = False,
+    raise_error: bool = True,
+    silent: bool = False,
+):
+    weak_fail, fail = False, False
+    data_flat = _flatten_dict(data)
+    example_data_flat = _flatten_dict(example_data)
+
+    # Check that all elements are present
+    if set(data_flat.keys()) != set(example_data_flat.keys()):
+        if not silent:
+            extra = set(data_flat.keys()) - set(example_data_flat.keys())
+            if extra:
+                logging.warning(
+                    "'%s' contains extra items compared to example_batch: %s",
+                    name,
+                    {"/".join(x) for x in extra},
+                )
+            missing = set(example_data_flat.keys()) - set(data_flat.keys())
+            if missing:
+                logging.warning(
+                    "'%s' is missing items compared to example_batch: %s",
+                    name,
+                    {"/".join(x) for x in missing},
+                )
+        weak_fail = True
+
+    mismatched_keys = {
+        k: f"{data_flat[k].shape} != {example_data_flat[k].shape}"
+        for k in data_flat
+        if k in example_data_flat
+        and data_flat[k].shape[starting_dim:]
+        != example_data_flat[k].shape[starting_dim:]
+    }
+    if mismatched_keys:
+        if not silent:
+            logging.error(
+                "'%s' contains mismatched shapes compared to example_batch: %s",
+                name,
+                flax.core.pretty_repr(
+                    {"/".join(k): v for k, v in mismatched_keys.items()}
+                ),
+            )
+        fail = True
+
+    if raise_error and (fail or (weak_fail and strict)):
+        raise AssertionError(f"{name} does not match example batch.")
+
+    return weak_fail or fail
+
+
+
+
+def _download_from_huggingface(huggingface_repo_id: str):
+    import huggingface_hub
+
+    folder = huggingface_hub.snapshot_download(huggingface_repo_id)
+    return folder
+    return folder
+
