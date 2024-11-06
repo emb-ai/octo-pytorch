@@ -85,7 +85,7 @@ new_config = {
                     'args': [],
                     'kwargs': {},
                     'module': 'octo.model.components.vit_encoders_pt',
-                    'name': 'SmallStemPt16'
+                    'name': 'SmallStem16Pt'
                 },
                 'obs_stack_keys': ['image_primary'],
                 'task_stack_keys': ['image_primary']
@@ -100,7 +100,7 @@ new_config = {
                     'args': [],
                     'kwargs': {},
                     'module': 'octo.model.components.vit_encoders_pt',
-                    'name': 'SmallStemPt16'
+                    'name': 'SmallStem16Pt'
                     },
                 'obs_stack_keys': ['image_wrist'],
                 'task_stack_keys': ['image_wrist']

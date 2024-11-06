@@ -254,12 +254,12 @@ class ViTResnetPt(nn.Module):
         return x
 
 
-class SmallStemPt16(SmallStemPt):
+class SmallStem16Pt(SmallStemPt):
     def __init__(self, **kwargs):
         super().__init__(patch_size=16, **kwargs)
 
 
-class SmallStemPt32(SmallStemPt):
+class SmallStem32Pt(SmallStemPt):
     def __init__(self, **kwargs):
         super().__init__(patch_size=32, **kwargs)
 
