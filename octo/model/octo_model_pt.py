@@ -2,6 +2,7 @@ from functools import partial
 import json
 import logging
 from typing import Any, Optional, Tuple, Dict
+from octo.utils.typing import Config
 
 import torch
 from torch._prims_common import DeviceLikeType
@@ -9,7 +10,10 @@ from torch._prims_common import DeviceLikeType
 from torchvision.transforms import ToTensor
 import numpy as np
 import tensorflow as tf
+import jax
+import jax.numpy as jnp
 import flax
+import orbax.checkpoint
 
 from octo.data.utils.data_utils import NormalizationType
 from octo.data.utils.text_processing import TextProcessor
@@ -17,6 +21,7 @@ from octo.model.components.action_heads import ActionHead
 from octo.model.octo_module_pt import OctoModulePt
 from octo.utils.spec import ModuleSpec
 from octo.utils.typing import Sequence
+from octo.model.octo_module import OctoModule
 
 class OctoModelPt:
     """Recommended way of interacting with Octo models.
@@ -48,7 +53,7 @@ class OctoModelPt:
         self.example_batch = example_batch
         self.dataset_statistics = dataset_statistics
         self.to_tensor = ToTensor()
-
+        self.device = None
     
     def create_tasks(
         self, 
@@ -65,6 +70,9 @@ class OctoModelPt:
         Omit images to run the language-conditioned model, and omit texts to run the
         goal-conditioned model.
         """
+        if device is None:
+            device = self.device
+        
         assert goals is not None or texts is not None
         tasks = {"pad_mask_dict": {}}
         if goals is not None:
@@ -116,39 +124,95 @@ class OctoModelPt:
             del tasks["language_instruction"]
 
         _verify_shapes(tasks, "tasks", self.example_batch["task"], starting_dim=1)
-        return tasks
+        return tasks 
+        
     
-    def load_np_example_batch(self, checkpoint_path):
+    @classmethod
+    def load_pretrained_from_jax(
+        cls,
+        checkpoint_path: str,
+        step: Optional[int] = None,
+    ) -> "OctoModelPt":
+        """Loads a model from a checkpoint that was saved via `save_pretrained`.
+
+        Args:
+            checkpoint_path (str): A path to either a directory of checkpoints or a single checkpoint.
+            step (int, optional): If multiple checkpoints are present, which one to load. Defaults to the latest.
+        """
         if checkpoint_path.startswith("hf://"):
+            if step:
+                raise ValueError(
+                    "You can't set config['pretrained_step'] when loading from HuggingFace."
+                )
             checkpoint_path = _download_from_huggingface(
                 checkpoint_path.removeprefix("hf://")
             )
+
+        # load config
         with tf.io.gfile.GFile(
             tf.io.gfile.join(checkpoint_path, "config.json"), "r"
         ) as f:
             config = json.load(f)
+
         # shim to support old configs
         if "pred_horizon" in config["model"]["heads"]["action"]["kwargs"]:
             config["model"]["heads"]["action"]["kwargs"]["action_horizon"] = config[
                 "model"
             ]["heads"]["action"]["kwargs"].pop("pred_horizon")
-            
-        # load example batch
+
+        # load dataset statistics
         with tf.io.gfile.GFile(
-            tf.io.gfile.join(checkpoint_path, "example_batch.msgpack"), "rb"
+            tf.io.gfile.join(checkpoint_path, "dataset_statistics.json"), "r"
         ) as f:
-            example_batch = flax.serialization.msgpack_restore(f.read())
-        # shim for migrating from "tasks" to "task"
-        if "tasks" in example_batch:
-            example_batch["task"] = example_batch.pop("tasks")
-        # shim for old checkpoints
-        if "timestep_pad_mask" not in example_batch["observation"]:
-            example_batch["observation"]["timestep_pad_mask"] = example_batch[
-                "observation"
-            ]["pad_mask"]
-        self.example_batch =  _np2pt(example_batch)
-        return self.example_batch
+            dataset_statistics = json.load(f)
+            dataset_statistics = jax.tree_map(
+                np.array, dataset_statistics, is_leaf=lambda x: not isinstance(x, dict)
+            )
+
+        # create model def (an OctoModule)
+        module = OctoModule.create(**config["model"])
         
+        config_pt = config
+        config_pt['model'] = _jax_config_to_pt_config(config_pt['model'])
+        module_pt = OctoModulePt.create(**config_pt["model"])
+        # infer params shape without actually doing any computation
+
+        example_batch = load_np_example_batch(checkpoint_path)
+        
+        init_args = (
+            example_batch["observation"],
+            example_batch["task"],
+            example_batch["observation"]["timestep_pad_mask"],
+        )
+        params_shape = jax.eval_shape(
+            partial(module.init, train=False), jax.random.PRNGKey(0), *init_args
+        )["params"]
+        # restore params, checking to make sure the shape matches
+        checkpointer = orbax.checkpoint.CheckpointManager(
+            checkpoint_path, orbax.checkpoint.PyTreeCheckpointer()
+        )
+        step = step if step is not None else checkpointer.latest_step()
+        params = checkpointer.restore(step, params_shape)
+
+        if config["text_processor"] is not None:
+            text_processor = ModuleSpec.instantiate(config["text_processor"])()
+        else:
+            text_processor = None
+        
+        example_batch = _np2pt(example_batch)
+        dataset_statistics = _np2pt(dataset_statistics)
+        
+        
+        octo_model = cls(
+            module = module_pt,
+            text_processor = text_processor,
+            config = config_pt,
+            example_batch = example_batch,
+            dataset_statistics = dataset_statistics
+        )
+        octo_model.module.load_jax_weights(params)
+
+        return octo_model, params
 
     def run_transformer(
         self,
@@ -180,8 +244,11 @@ class OctoModelPt:
             tasks,
             timestep_pad_mask,
             train=train,
-            method="octo_transformer",
         )
+        
+    def to(self, device):
+        self.device = device
+        self.module.to(device)
     
     def sample_actions(
         self
@@ -200,7 +267,7 @@ class OctoModelPt:
         cls,
         checkpoint_path: str,
         step: Optional[int] = None,
-    ) -> "OctoModel":
+    ) -> "OctoModelPt":
         """Loads a model from a checkpoint that was saved via `save_pretrained`.
 
         Args:
@@ -217,6 +284,11 @@ class OctoModelPt:
     @classmethod
     def from_config(
         cls,
+        config: Config,
+        example_batch: Dict,
+        text_processor: Optional[Any] = None,
+        verbose: bool = False,
+        dataset_statistics: Optional[Dict] = None,
     ):
         """Initializes a model with a fresh set of weights from a given config + example_batch.
 
@@ -229,12 +301,57 @@ class OctoModelPt:
             rng (Optional[PRNGKey], optional): RNG key for initializing the model.
             dataset_statistics (Optional[Dict[str, Any]], optional): Dataset statistics.
         """
-        pass
+        module = OctoModule.create(**config["model"])
+        
+        return cls(
+            module=module,
+            text_processor=text_processor,
+            example_batch=example_batch,
+            config=config,
+            dataset_statistics=dataset_statistics,
+        )
+
 
     def get_pretty_spec(self):
         """Brief summary of the model's expected inputs and outputs."""
         # TODO: generalize this to print out proprio when it is being tokenized
         pass
+
+def load_np_example_batch(checkpoint_path):
+    if checkpoint_path.startswith("hf://"):
+        checkpoint_path = _download_from_huggingface(
+            checkpoint_path.removeprefix("hf://")
+        )
+        
+    # load example batch
+    with tf.io.gfile.GFile(
+        tf.io.gfile.join(checkpoint_path, "example_batch.msgpack"), "rb"
+    ) as f:
+        example_batch = flax.serialization.msgpack_restore(f.read())
+    # shim for migrating from "tasks" to "task"
+    if "tasks" in example_batch:
+        example_batch["task"] = example_batch.pop("tasks")
+    # shim for old checkpoints
+    if "timestep_pad_mask" not in example_batch["observation"]:
+        example_batch["observation"]["timestep_pad_mask"] = example_batch[
+            "observation"
+        ]["pad_mask"]
+    return example_batch
+
+def _jax_config_to_pt_config(config):
+    if isinstance(config, dict):
+        config_pt = {}
+        if 'module' in config:
+            config_pt['args'] = config['args']
+            config_pt['kwargs'] = {key: _jax_config_to_pt_config(val) for key, val in config['kwargs'].items()}
+            config_pt['module'] = config['module'] + '_pt'
+            config_pt['name'] = config['name'] + 'Pt'
+        else:
+            config_pt = {key: _jax_config_to_pt_config(val) for key, val in config.items()}
+        return config_pt
+    else:
+        return config
+
 
 def _np2pt(data, device=None):
     if isinstance(data, dict):

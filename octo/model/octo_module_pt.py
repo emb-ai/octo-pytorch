@@ -81,7 +81,8 @@ class OctoTransformerPt(nn.Module, FromJaxModel):
                 num_tokens_dict = {
                     'primary': 256,
                     'wrist': 64,
-                    'task_language_pos_embedding': 16
+                    # 'task_language_pos_embedding': 16,
+                    'language': 16
                 },
                  ):
         super().__init__()
@@ -380,8 +381,12 @@ class OctoModulePt(nn.Module, FromJaxModel):
         self.octo_transformer.load_jax_weights(jax_params['octo_transformer'])
         # TODO: remove if
         if self.heads:
-            for key in self.heads:
-                self.heads[key].load_jax_weights(jax_params['heads_action'][key])
+            if len(self.heads):
+                self.heads['action'].load_jax_weights(jax_params['heads_action'])
+            else:
+                # ??? TODO
+                for key in self.heads:
+                    self.heads[key].load_jax_weights(jax_params['heads_action'][key])
     
     @classmethod
     def create(cls,
@@ -411,8 +416,18 @@ class OctoModulePt(nn.Module, FromJaxModel):
 
         head_defs = None # TODO remove
         if heads:
-            head_defs = {k: ModuleSpec.instantiate(spec)() for k, spec in heads.items()}
-
+            head_defs = {}
+            
+            # append number of input dimensions to kwargs
+            for k, spec in heads.items():
+                head_defs[k] = spec
+                if not 'input_dim' in head_defs[k]['kwargs']:
+                    head_defs[k]['kwargs']['input_dim'] = token_embedding_size
+                    
+            head_defs = {
+                k: ModuleSpec.instantiate(spec)() for k, spec in head_defs.items()
+            }
+                    
         model_def = OctoTransformerPt(
             observation_tokenizers=observation_tokenizer_defs,
             task_tokenizers=task_tokenizer_defs,

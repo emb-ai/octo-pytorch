@@ -17,7 +17,7 @@ import json
 
 from octo.data.utils.text_processing import HFTokenizer
 from octo.model.octo_model import OctoModel
-from octo.model.octo_model_pt import OctoModelPt
+from octo.model.octo_model_pt import OctoModelPt, load_np_example_batch, _np2pt
 from octo.utils.spec import ModuleSpec
 from octo.model.octo_module import OctoModule
 from octo.model.components.vit_encoders import StdConv
@@ -80,7 +80,7 @@ text_processor = HFTokenizer(
     encode_with_model = False,
 )
 model_pt = OctoModelPt(None, text_processor, None, None, None)
-model_pt.load_np_example_batch("hf://rail-berkeley/octo-small-1.5")
+model_pt.example_batch = _np2pt(load_np_example_batch("hf://rail-berkeley/octo-small-1.5"))
 
 
 new_config = {'args': [],
