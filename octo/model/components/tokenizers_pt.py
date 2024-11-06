@@ -262,84 +262,121 @@ class LanguageTokenizerPt(nn.Module, FromJaxModel):
         return TokenGroupPt(tokens, pad_mask)
 
 
-# class BinTokenizer(nn.Module):
-#     """
-#     Tokenizes continuous inputs via dimension-wise binning in given range.
+class BinTokenizerPt(nn.Module, FromJaxModel):
+    """
+    Tokenizes continuous inputs via dimension-wise binning in given range.
 
-#     Args:
-#         n_bins (int): Number of discrete bins per dimension.
-#         bin_type (str): Type of binning. ['uniform', 'normal' = Gaussian]
-#         low (float): Lower bound for bin range.
-#         high (float): Upper bound for bin range.
-#     """
+    Args:
+        n_bins (int): Number of discrete bins per dimension.
+        bin_type (str): Type of binning. ['uniform', 'normal' = Gaussian]
+        low (float): Lower bound for bin range.
+        high (float): Upper bound for bin range.
+    """
 
-#     n_bins: int = 256
-#     bin_type: str = "uniform"
-#     low: float = 0
-#     high: float = 1
+    def __init__(
+        self,
+        n_bins: int = 256,
+        bin_type: str = "uniform",
+        low: float = 0,
+        high: float = 1
+    ):
+        super().__init__()
+        self.n_bins = n_bins
+        self.bin_type = bin_type
+        self.low = low
+        self.high = high
 
-#     def setup(self):
-#         if self.bin_type == "uniform":
-#             self.thresholds = jnp.linspace(self.low, self.high, self.n_bins + 1)
-#         elif self.bin_type == "normal":
-#             self.thresholds = norm.ppf(jnp.linspace(EPS, 1 - EPS, self.n_bins + 1))
-#         else:
-#             raise ValueError(
-#                 f"Binning type {self.bin_type} not supported in BinTokenizer."
-#             )
+        # Initialize thresholds
+        if self.bin_type == "uniform":
+            thresholds = torch.linspace(self.low, self.high, self.n_bins + 1)
+        elif self.bin_type == "normal":
+            # Convert numpy array to torch tensor
+            thresholds = torch.from_numpy(
+                norm.ppf(torch.linspace(EPS, 1 - EPS, self.n_bins + 1).numpy())
+            ).float()
+        else:
+            raise ValueError(f"Binning type {self.bin_type} not supported in BinTokenizer.")
+        
+        # Register thresholds as buffer (non-trainable tensor)
+        self.register_buffer('thresholds', thresholds)
 
-#     def __call__(self, inputs):
-#         if self.bin_type == "uniform":
-#             inputs = jnp.clip(inputs, self.low + EPS, self.high - EPS)
-#         inputs = inputs[..., None]
-#         token_one_hot = (inputs < self.thresholds[1:]) & (
-#             inputs >= self.thresholds[:-1]
-#         ).astype(jnp.uint8)
-#         output_tokens = jnp.argmax(token_one_hot, axis=-1)
-#         return output_tokens
+    def load_jax_weights(self, jax_params=None):
+        pass
+    
+    def forward(self, inputs: torch.Tensor) -> torch.Tensor:
+        if self.bin_type == "uniform":
+            inputs = torch.clamp(inputs, self.low + EPS, self.high - EPS)
+        
+        inputs = inputs.unsqueeze(-1)
+        token_one_hot = (inputs < self.thresholds[1:]) & (inputs >= self.thresholds[:-1])
+        output_tokens = torch.argmax(token_one_hot.to(torch.uint8), dim=-1)
+        return output_tokens
 
-#     def decode(self, inputs):
-#         one_hot = jax.nn.one_hot(inputs, self.n_bins)
-#         bin_avgs = (self.thresholds[1:] + self.thresholds[:-1]) / 2
-#         outputs = jnp.sum(one_hot * bin_avgs, axis=-1)
-#         return outputs
+    def decode(self, inputs: torch.Tensor) -> torch.Tensor:
+        one_hot = nn.functional.one_hot(inputs, self.n_bins).float()
+        bin_avgs = (self.thresholds[1:] + self.thresholds[:-1]) / 2
+        outputs = torch.sum(one_hot * bin_avgs, dim=-1)
+        return outputs
 
 
-# class LowdimObsTokenizer(BinTokenizer):
-#     """
-#     Tokenizer for non-spatial observations. Optionally discretizes into bins per dimension (see BinTokenizer).
+    @property
+    def output_dim(self) -> int:
+        return self.n_bins
+    
+class LowdimObsTokenizerPt(BinTokenizerPt):
+    """
+    Tokenizer for non-spatial observations. Optionally discretizes into bins per dimension.
 
-#     Args:
-#         obs_keys (Sequence[str]): List of non-spatial keys to concatenate & tokenize. Supports regex.
-#         discretize (bool): If True, discretizes inputs per dimension, see BinTokenizer.
-#     """
+    Args:
+        obs_keys (Sequence[str]): List of non-spatial keys to concatenate & tokenize. Supports regex.
+        discretize (bool): If True, discretizes inputs per dimension, see BinTokenizer.
+        proper_pad_mask (bool): If True, allows skipping tokenizer when no matching keys found.
+    """
+    def __init__(
+        self,
+        obs_keys: Sequence[str] = tuple(),
+        discretize: bool = False,
+        proper_pad_mask: bool = True,
+        **bin_tokenizer_kwargs
+    ):
+        super().__init__(**bin_tokenizer_kwargs)
+        self.obs_keys = obs_keys
+        self.discretize = discretize
+        self.proper_pad_mask = proper_pad_mask
 
-#     obs_keys: Sequence[str] = tuple()
-#     discretize: bool = False
-#     proper_pad_mask: bool = True
+    def load_jax_weights(self, jax_params=None):
+        pass
+    
+    def forward(self, observations, *unused_args, **unused_kwargs) -> TokenGroupPt:
+        assert self.obs_keys, "Need to specify observation keys to tokenize."
+        
+        matching_keys = regex_filter(self.obs_keys, sorted(observations.keys()))
+        if len(matching_keys) == 0:
+            logging.warning(
+                f"No observation inputs matching {self.obs_keys} were found. "
+                "Skipping tokenizer entirely."
+            )
+            assert self.proper_pad_mask, "Cannot skip unless using proper pad mask."
+            return None
 
-#     def __call__(self, observations, *unused_args, **unused_kwargs):
-#         assert self.obs_keys, "Need to specify observation keys to tokenize."
-#         if len(regex_filter(self.obs_keys, sorted(observations.keys()))) == 0:
-#             logging.warning(
-#                 f"No observation inputs matching {self.obs_keys} were found."
-#                 "Skipping tokenizer entirely."
-#             )
-#             assert self.proper_pad_mask, "Cannot skip unless using proper pad mask."
-#             return None
+        tokenizer_inputs = []
+        for o_key in self.obs_keys:
+            for key in filter(re.compile(o_key).match, sorted(observations.keys())):
+                assert len(observations[key].shape) == 3, \
+                    f"Only supports non-spatial inputs but {key} has shape {observations[key].shape}."
+                tokenizer_inputs.append(observations[key])
+        
+        tokenizer_inputs = torch.cat(tokenizer_inputs, dim=-1)
+        
+        if self.discretize:
+            tokenized_inputs = super().forward(tokenizer_inputs)
+            tokens = nn.functional.one_hot(tokenized_inputs, self.n_bins).float()
+        else:
+            tokens = tokenizer_inputs.unsqueeze(-1)
+        
+        mask = torch.ones(tokens.shape[:-1], dtype=torch.bool, device=tokens.device)
+        return TokenGroupPt(tokens, mask)
 
-#         tokenizer_inputs = []
-#         for o_key in self.obs_keys:
-#             for key in filter(re.compile(o_key).match, sorted(observations.keys())):
-#                 assert (
-#                     len(observations[key].shape) == 3
-#                 ), f"Only supports non-spatial inputs but {key} has shape {observations[key].shape}."
-#                 tokenizer_inputs.append(observations[key])
-#         tokenizer_inputs = jnp.concatenate(tokenizer_inputs, axis=-1)
-#         if self.discretize:
-#             tokenized_inputs = super().__call__(tokenizer_inputs)
-#             tokens = jax.nn.one_hot(tokenized_inputs, self.n_bins)
-#         else:
-#             tokens = tokenizer_inputs[..., None]
-#         mask = jnp.ones(tokens.shape[:-1])
-#         return TokenGroup(tokens, mask)
+    @property
+    def output_dim(self) -> int:
+        return self.n_bins if self.discretize else 1

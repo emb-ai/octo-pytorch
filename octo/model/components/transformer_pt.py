@@ -5,17 +5,90 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F 
 
-from octo.model.components.base import TokenGroup
+from octo.model.components.base import TokenGroupPt
 from octo.utils.typing import Dtype, PRNGKey, Shape, Union, Tuple
 
 from octo.model.components.jax_pt import FromJaxModel, LinearPt, LayerNormPt
 
 class MAPHeadPt(nn.Module, FromJaxModel):
-    def __init__(self, *args, **kwargs):
-        raise NotImplementedError
-    
-    def load_jax_weights(self, params):
-        raise NotImplementedError
+    """Multihead Attention Pooling.
+    PyTorch version of the MAP head from Big Vision.
+    """
+    def __init__(
+        self,
+        input_dim: int,
+        mlp_dim: Optional[int] = None,
+        num_heads: int = 8,
+        num_readouts: int = 1
+    ):
+        super().__init__()
+        self.input_dim = input_dim
+        self.mlp_dim = mlp_dim if mlp_dim is not None else 4 * input_dim
+        self.num_heads = num_heads
+        self.num_readouts = num_readouts
+
+        # Initialize probe parameter
+        self.probe = nn.Parameter(torch.empty(1, num_readouts, input_dim))
+        nn.init.xavier_uniform_(self.probe)
+
+        # Initialize layers
+        self.attention = MultiheadAttentionPt(
+            embed_dim=input_dim,
+            num_heads=num_heads,
+            batch_first=True
+        )
+        self.layer_norm = LayerNormPt(input_dim)
+        self.mlp_block = MlpBlockPt(
+            input_dim,
+            mlp_dim=self.mlp_dim,
+            dropout_rate=0.0  # No dropout as per original
+        )
+
+    def forward(
+        self, 
+        x: Union[torch.Tensor, TokenGroupPt], 
+        train: bool = True
+    ) -> torch.Tensor:
+        if isinstance(x, TokenGroupPt):
+            x, mask = x.tokens, x.mask
+        else:
+            mask = None
+
+        # Handle input reshaping
+        *batch_dims, l, d = x.shape
+        x = x.reshape(-1, l, d)
+        batch_size = x.shape[0]
+
+        # Expand probe to batch size
+        probe = self.probe.expand(batch_size, -1, -1)
+
+        # Prepare attention mask if provided
+        if mask is not None:
+            mask = mask.reshape(-1, l)
+            # Convert mask to PyTorch attention mask format
+            # PyTorch uses True to mask out values
+            attention_mask = ~mask
+
+        # Apply attention
+        # PyTorch's MultiheadAttention expects different signature than JAX
+        out, _ = self.attention(
+            query=probe,
+            key=x,
+            value=x,
+            key_padding_mask=attention_mask if mask is not None else None
+        )
+
+        # Apply layer norm and residual connection with MLP
+        y = self.layer_norm(out)
+        out = out + self.mlp_block(y, deterministic=not train)
+
+        # Reshape output back to original batch dimensions
+        out = out.reshape(*batch_dims, self.num_readouts, d)
+        return out
+
+    @property
+    def output_dim(self) -> int:
+        return self.input_dim
 
 
 class AddPositionEmbsPt(nn.Module, FromJaxModel):
