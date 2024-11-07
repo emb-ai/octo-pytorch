@@ -27,7 +27,8 @@ from octo.data.utils.text_processing import HFTokenizer
 
 
 device='cuda:0'
-model_pt = OctoModelPt.load_pretrained_from_jax("hf://rail-berkeley/octo-small-1.5")
+model_pt, _, uninitialized_params, unused_jax_params = OctoModelPt.load_pretrained_from_jax("hf://rail-berkeley/octo-small-1.5")
+print(uninitialized_params, unused_jax_params)
 model_pt.module.heads = None
 model_pt.to(device)
 model_pt.module.eval()

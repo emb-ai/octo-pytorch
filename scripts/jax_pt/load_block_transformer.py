@@ -283,9 +283,11 @@ def test_block_transformer(
         }
     
     transformer_pt = ModuleSpec.instantiate(new_config)()
-    transformer_pt.load_jax_weights(params['octo_transformer']['BlockTransformer_0'])
+    uninitialized_params, unused_jax_params = transformer_pt.load_jax_weights(params['octo_transformer'], 'BlockTransformer_0', 'transformer_pt')
     transformer_pt.to(device)
     transformer_pt.eval()
+    
+    print(uninitialized_params, unused_jax_params)
     
     all_prefix_groups_pt = [group.to(device) for group in all_prefix_groups_pt]
     all_timestep_groups_pt = [group.to(device) for group in all_timestep_groups_pt]

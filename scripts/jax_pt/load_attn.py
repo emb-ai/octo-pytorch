@@ -89,8 +89,10 @@ new_config
 attn_pt = ModuleSpec.instantiate(new_config)()
 print(attn_pt.state_dict().keys())
 
-attn_pt.load_jax_weights(params['octo_transformer']['BlockTransformer_0']['Transformer_0']['encoderblock_0']['MultiHeadDotProductAttention_0'])
+uninitialized_params, unused_jax_params = attn_pt.load_jax_weights(params['octo_transformer']['BlockTransformer_0']['Transformer_0']['encoderblock_0'], 'MultiHeadDotProductAttention_0', 'MultiheadAttentionPt')
 attn_pt.eval()
+
+print(uninitialized_params, unused_jax_params)
 
 x_pt = torch.from_numpy(x).float()
 att_mask_pt = torch.from_numpy(att_mask).float()
@@ -103,4 +105,4 @@ print(output_pt.shape)
 print(output_pt[0, 0])
 
 
-print(np.all(np.isclose(output_pt.cpu().numpy(), jax_out, 0.01, 0.01)))
+print(np.all(np.isclose(output_pt.cpu().numpy(), jax_out, 0.001, 0.001)))

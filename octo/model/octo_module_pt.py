@@ -129,42 +129,49 @@ class OctoTransformerPt(nn.Module, FromJaxModel):
                 for readout_name in self.readouts
             })
         )
-    
-    def load_jax_weights(self, jax_params=None):
-        self.block_transformer.load_jax_weights(jax_params['BlockTransformer_0'])
+        
+    @property
+    def pt_to_jax_args_map(self):
+        # {
+        # pt_module_name: (load_func, jax_param_key),
+        # ...
+        # }
+        pt_to_jax = {
+            "block_transformer": (self.block_transformer.load_jax_weights, 'BlockTransformer_0')
+        }
         for name in self.observation_tokenizers:
             jax_param_name = f'observation_tokenizers_{name}'
-            if not jax_param_name in jax_params:
-                logging.warning(f"Skipping parameter: {jax_param_name}")
-                continue
-            self.observation_tokenizers[name].load_jax_weights(jax_params[jax_param_name])
+            pt_to_jax[jax_param_name] = (
+                self.observation_tokenizers[name].load_jax_weights,
+                jax_param_name
+            )
         
         for name in self.task_tokenizers:
             jax_param_name = f'task_tokenizers_{name}'
-            if not jax_param_name in jax_params:
-                logging.warning(f"Skipping parameter: {jax_param_name}")
-                continue
-            self.task_tokenizers[name].load_jax_weights(jax_params[jax_param_name])
+            pt_to_jax[jax_param_name] = (
+                self.task_tokenizers[name].load_jax_weights,
+                jax_param_name
+            )
         
         for name in self.task_projections:
-            if not name in jax_params:
-                logging.warning(f"Skipping parameter: {name}")
-                continue
-            self.task_projections[name].load_jax_weights(jax_params[name])
+            pt_to_jax[name] = (
+                self.task_projections[name].load_jax_weights,
+                name
+            )
             
         for name in self.obs_projections:
-            if not name in jax_params:
-                logging.warning(f"Skipping parameter: {name}")
-                continue
-            self.obs_projections[name].load_jax_weights(jax_params[name])
+            pt_to_jax[name] = (
+                self.obs_projections[name].load_jax_weights,
+                name
+            )
             
         for name in self.pos_embeddings:
-            if not name in jax_params:
-                logging.warning(f"Skipping parameter: {name}")
-                continue
-            self.pos_embeddings[name].load_jax_weights(jax_params[name])
+            pt_to_jax[name] = (
+                self.pos_embeddings[name]._set_pos_embed_params,
+                name
+            )
         
-        
+        return pt_to_jax
     
     def forward(self,
         observations,
@@ -377,16 +384,20 @@ class OctoModulePt(nn.Module, FromJaxModel):
         self.octo_transformer = octo_transformer
         self.heads = heads
     
-    def load_jax_weights(self, jax_params=None):
-        self.octo_transformer.load_jax_weights(jax_params['octo_transformer'])
-        # TODO: remove if
+    @property      
+    def pt_to_jax_args_map(self):
+        # {
+        # pt_module_name: (load_func, jax_param_key),
+        # ...
+        # }
+        pt_to_jax = {
+            "octo_transformer": (self.octo_transformer.load_jax_weights, 'octo_transformer'),
+        }
         if self.heads:
-            if len(self.heads):
-                self.heads['action'].load_jax_weights(jax_params['heads_action'])
-            else:
-                # ??? TODO
-                for key in self.heads:
-                    self.heads[key].load_jax_weights(jax_params['heads_action'][key])
+            pt_to_jax["heads"] = (self.heads['action'].load_jax_weights, 'heads_action')
+            
+        return pt_to_jax
+        
     
     @classmethod
     def create(cls,

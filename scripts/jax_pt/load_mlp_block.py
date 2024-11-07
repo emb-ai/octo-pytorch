@@ -85,8 +85,10 @@ new_config
 mlp_pt = ModuleSpec.instantiate(new_config)()
 print(mlp_pt.state_dict().keys())
 
-mlp_pt.load_jax_weights(params['octo_transformer']['BlockTransformer_0']['Transformer_0']['encoderblock_0']['MlpBlock_0'])
+uninitialized_params, unused_jax_params = mlp_pt.load_jax_weights(params['octo_transformer']['BlockTransformer_0']['Transformer_0']['encoderblock_0'], 'MlpBlock_0', 'mlp_pt')
 mlp_pt.eval()
+
+print(uninitialized_params, unused_jax_params)
 
 x_pt = torch.from_numpy(x).float()
 att_mask_pt = torch.from_numpy(att_mask).float()

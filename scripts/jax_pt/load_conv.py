@@ -85,8 +85,10 @@ new_config
 conv = ModuleSpec.instantiate(new_config)()
 print(conv.state_dict().keys())
 
-conv.load_jax_weights(params['octo_transformer']['observation_tokenizers_primary']['SmallStem16_0']['StdConv_0'])
+uninitialized_params, unused_jax_params = conv.load_jax_weights(params['octo_transformer']['observation_tokenizers_primary']['SmallStem16_0'], 'StdConv_0', 'conv')
 conv.eval()
+
+print(uninitialized_params, unused_jax_params)
 
 x_pt = torch.from_numpy(x).permute((0, 3, 1, 2)).float()
 

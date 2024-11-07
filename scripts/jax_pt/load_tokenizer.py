@@ -97,7 +97,8 @@ new_config
 tokenizer_pt = ModuleSpec.instantiate(new_config)()
 print(tokenizer_pt.state_dict().keys())
 
-tokenizer_pt.load_jax_weights(params['octo_transformer']['observation_tokenizers_primary'])
+uninitialized_params, unused_jax_params = tokenizer_pt.load_jax_weights(params['octo_transformer'], 'observation_tokenizers_primary', 'img_tokenizer')
+print(uninitialized_params, unused_jax_params)
 tokenizer_pt.eval()
 
 obs_pt = {

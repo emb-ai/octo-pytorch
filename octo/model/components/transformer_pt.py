@@ -1,6 +1,6 @@
 # adapted from https://github.com/google-research/vision_transformer/blob/main/vit_jax/models_vit.py
 from typing import Callable, Optional
-
+from functools import partial
 import torch
 import torch.nn as nn
 import torch.nn.functional as F 
@@ -44,6 +44,14 @@ class MAPHeadPt(nn.Module, FromJaxModel):
             dropout_rate=0.0  # No dropout as per original
         )
 
+    @property
+    def pt_to_jax_args_map(self):
+        return {
+            'attention': (self.attention.load_jax_weights, 'MultiHeadDotProductAttention_0'),
+            'layer_norm': (self.layer_norm.load_jax_weights, 'LayerNorm_0'),
+            'mlp_block': (self.mlp_block.load_jax_weights, 'MlpBlock_0'),
+        }
+        
     def forward(
         self, 
         x: Union[torch.Tensor, TokenGroupPt], 
@@ -103,11 +111,24 @@ class AddPositionEmbsPt(nn.Module, FromJaxModel):
         self.history_dim = history_dim
         pos_embed = torch.randn(*emb_shape) * 0.02
         self.pos_embed = nn.Parameter(pos_embed) # trainable
-
-    def load_jax_weights(self, jax_params):
-        pos_embed = self._get_param(jax_params[0])
-        self.assign_new_value('pos_embed', pos_embed)
-        
+    
+    @property
+    def pt_to_jax_args_map(self):
+        # {
+        # pt_module_name: (load_func, jax_param_key),
+        # ...
+        # }
+        return{
+            # 'pos_embed': (partial(self._set_terminal_param, transform_function = lambda x: x[0]), 'position_embedding')
+        } 
+    
+    def _set_pos_embed_params(self, jax_params, key_jax, key_pt): # TODO redo
+        if key_jax not in jax_params:
+            return [f'{key_pt}'], []
+        jax_param = jax_params[key_jax][0]
+        weight = torch.from_numpy(jax_param.copy()).float()
+        self.assign_new_value('pos_embed', nn.Parameter(weight))
+        return [], []
     
     def forward(self, inputs: torch.Tensor) -> torch.Tensor:
         """Applies the AddPositionEmbs module.
@@ -171,11 +192,17 @@ class MlpBlockPt(nn.Module, FromJaxModel):
         self.dense2 = LinearPt(mlp_dim, inp_dim) if out_dim is None else LinearPt(mlp_dim, out_dim)
         self.dropout1 = nn.Dropout(p=dropout_rate)
         self.dropout2 = nn.Dropout(p=dropout_rate)
-        
-    def load_jax_weights(self, params):
-        self.dense1.load_jax_weights(params['Dense_0'])
-        self.dense2.load_jax_weights(params['Dense_1'])
 
+    @property
+    def pt_to_jax_args_map(self):
+        # {
+        # pt_module_name: (load_func, jax_param_key),
+        # ...
+        # }
+        return{
+            'dense1': (self.dense1.load_jax_weights, 'Dense_0'),
+            'dense2': (self.dense2.load_jax_weights, 'Dense_1')
+        }    
 
     def forward(self, inputs: torch.Tensor, deterministic: bool = False) -> torch.Tensor:
         """Applies Transformer MlpBlock module."""
@@ -189,21 +216,68 @@ class MlpBlockPt(nn.Module, FromJaxModel):
         return output
     
 class MultiheadAttentionPt(nn.MultiheadAttention, FromJaxModel):
-    def load_jax_weights(self, params):
-        q_weight = self._get_param(params['query']['kernel'])
+    def load_jax_weights(self, jax_params, key_jax, key_pt):
+        """
+        We use strict initialization for MultiheadAttention.
+        If at least one JAX parameter is missed, the whole MultiheadAttentionPt
+        module is assumed as uninitialized.
+        """
+        is_ok, uninitialized_params, unused_jax_params = self.check_is_main_key_in_params(jax_params, key_jax, key_pt)
+        if not is_ok:
+            return uninitialized_params, unused_jax_params
+        
+        params = jax_params[key_jax]
+        
+        uninitialized_params = []
+        unused_jax_params = list(jax_params[key_jax].keys())
+        
+        
+        
+        q_weight, _ = self._get_param(params, ('query','kernel'))
+        if q_weight is None:
+            return [key_pt], unused_jax_params
+        
         features, num_heads, head_dim = q_weight.shape
         embed_dim = num_heads * head_dim
         
         q_weight = q_weight.permute((1, 2, 0)).reshape(embed_dim, embed_dim)
         
-        k_weight = self._get_param(params['key']['kernel']).permute((1, 2, 0)).reshape(embed_dim, embed_dim)
-       
-        v_weight = self._get_param(params['value']['kernel']).permute((1, 2, 0)).reshape(embed_dim, embed_dim)
+        k_weight, _ = self._get_param(params, ('key', 'kernel'))
+        if k_weight is None:
+            return [key_pt], unused_jax_params
+        k_weight = k_weight.permute((1, 2, 0)).reshape(embed_dim, embed_dim)
         
-        q_bias = self._get_param(params['query']['bias']).reshape(embed_dim)
-        k_bias = self._get_param(params['key']['bias']).reshape(embed_dim)
-        v_bias = self._get_param(params['value']['bias']).reshape(embed_dim)
-                
+        v_weight, _ = self._get_param(params, ('value', 'kernel'))
+        if v_weight is None:
+            return [key_pt], unused_jax_params
+        v_weight = v_weight.permute((1, 2, 0)).reshape(embed_dim, embed_dim)
+        
+        q_bias, _ = self._get_param(params, ('query', 'bias'))
+        if q_bias is None:
+            return [key_pt], unused_jax_params
+        q_bias = q_bias.reshape(embed_dim)
+        
+        k_bias, _ = self._get_param(params, ('key', 'bias'))
+        if k_bias is None:
+            return [key_pt], unused_jax_params
+        k_bias = k_bias.reshape(embed_dim)
+        
+        v_bias, _ = self._get_param(params, ('value', 'bias'))
+        if v_bias is None:
+            return [key_pt], unused_jax_params
+        v_bias = v_bias.reshape(embed_dim)
+        
+        out_proj_weight, _ = self._get_param(params, ('out', 'kernel'))
+        if out_proj_weight is None:
+            return [out_proj_weight], unused_jax_params
+        out_proj_weight = out_proj_weight.permute((2, 0, 1)).reshape(embed_dim, embed_dim)
+        
+        out_proj_bias, _ = self._get_param(params, ('out', 'bias'))
+        if out_proj_bias is None:
+            return [out_proj_bias], unused_jax_params
+               
+               
+               
         if not self._qkv_same_embed_dim:
             self.assign_new_value('q_proj_weight', q_weight)
             self.assign_new_value('k_proj_weight', k_weight)
@@ -215,11 +289,34 @@ class MultiheadAttentionPt(nn.MultiheadAttention, FromJaxModel):
         bias = torch.cat((q_bias, k_bias, v_bias), dim=0)
         self.assign_new_value('in_proj_bias', bias)
         
-        with torch.no_grad():
-            out_proj_weight = self._get_param(params['out']['kernel']).permute((2, 0, 1)).reshape(embed_dim, embed_dim)
-            out_proj_bias = self._get_param(params['out']['bias'])
-            self.assign_new_value('weight', out_proj_weight, self.out_proj)
-            self.assign_new_value('bias', out_proj_bias, self.out_proj)
+        
+        self.assign_new_value('weight', out_proj_weight, self.out_proj)
+        self.assign_new_value('bias', out_proj_bias, self.out_proj)
+
+        return [], []
+        
+    @property
+    def pt_to_jax_args_map(self):
+        """
+        This function is unused! We override load_jax_weights() instead!
+        """
+        if not self._qkv_same_embed_dim:
+            return {
+                'q_proj_weight': (None, 'query'),
+                'k_proj_weight': (None, 'key'),
+                'v_proj_weight': (None, 'value'),
+                'in_proj_bias' : (None, 'bias'),
+                'out_proj.weight' : (None, 'out/weight'),
+                'out_proj.bias' : (None, 'out/bias'),
+            }
+        else:
+            return {
+                'in_proj_weight': (None, 'qkv'),
+                'in_proj_bias' : (None, 'bias'),
+                'out_proj.weight' : (None, 'out/weight'),
+                'out_proj.bias' : (None, 'out/bias'),
+                
+            }
 
 class Encoder1DBlockPt(nn.Module, FromJaxModel):
     """Transformer encoder layer.
@@ -262,13 +359,20 @@ class Encoder1DBlockPt(nn.Module, FromJaxModel):
             mlp_dim=mlp_dim,
             dropout_rate=dropout_rate
         )
-        
-    def load_jax_weights(self, params):
-        self.layer_norm1.load_jax_weights(params['LayerNorm_0'])
-        self.layer_norm2.load_jax_weights(params['LayerNorm_1'])
-        self.self_attention.load_jax_weights(params['MultiHeadDotProductAttention_0'])
-        self.mlp_block.load_jax_weights(params['MlpBlock_0'])
-
+    
+    @property
+    def pt_to_jax_args_map(self):
+        # {
+        # pt_module_name: (load_func, jax_param_key),
+        # ...
+        # }
+        return {
+            "layer_norm1" : (self.layer_norm1.load_jax_weights, 'LayerNorm_0'),
+            "layer_norm2" : (self.layer_norm2.load_jax_weights, 'LayerNorm_1'),
+            "self_attention" : (self.self_attention.load_jax_weights, 'MultiHeadDotProductAttention_0'),
+            "mlp_block" : (self.mlp_block.load_jax_weights, 'MlpBlock_0'),
+        }
+    
     def forward(self, inputs: torch.Tensor, attention_mask: torch.Tensor, deterministic: bool = False):
         """Applies Encoder1DBlock module.
 
@@ -368,16 +472,22 @@ class TransformerPt(nn.Module, FromJaxModel):
         encoded = self.layer_norm(x)
 
         return encoded
-
-    def load_jax_weights(self, jax_params):
+    
+    @property
+    def pt_to_jax_args_map(self):
+        # {
+        # pt_module_name: (load_func, jax_param_key),
+        # ...
+        # }
+        pt_to_jax_args = {
+            "layer_norm": (self.layer_norm.load_jax_weights, 'encoder_norm')
+        }
         if self.add_position_embedding:
-            self.position_embedding.load_jax_weights(jax_params['position_embedding'])
-            
+            pt_to_jax_args['position_embedding'] = (self.position_embedding.load_jax_weights, 'position_embedding')
         for i in range(len(self.encoder_blocks)):
-            self.encoder_blocks[i].load_jax_weights(jax_params[f'encoderblock_{i}'])
+            pt_to_jax_args[f'encoder_blocks.{i}'] = (self.encoder_blocks[i].load_jax_weights, f'encoderblock_{i}')
         
-        self.layer_norm.load_jax_weights(jax_params['encoder_norm'])
-        
+        return pt_to_jax_args
 
 def common_transformer_sizes_pt(transformer_size: str) -> (int, dict):
     """

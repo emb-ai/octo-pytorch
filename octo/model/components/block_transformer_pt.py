@@ -119,8 +119,11 @@ class BlockTransformerPt(nn.Module, FromJaxModel):
         self.transformer = TransformerPt(**self.transformer_kwargs)
         self.attention_mask = None
 
-    def load_jax_weights(self, jax_params=None):
-        self.transformer.load_jax_weights(jax_params['Transformer_0'])
+    @property
+    def pt_to_jax_args_map(self):
+        return {
+            "transformer": (self.transformer.load_jax_weights, 'Transformer_0')
+        }
     
     def forward(
         self,

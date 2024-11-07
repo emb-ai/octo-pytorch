@@ -210,9 +210,9 @@ class OctoModelPt:
             example_batch = example_batch,
             dataset_statistics = dataset_statistics
         )
-        octo_model.module.load_jax_weights(params)
+        uninitialized_params, unused_jax_params = octo_model.module.load_jax_weights(params)
 
-        return octo_model, params
+        return octo_model, params, uninitialized_params, unused_jax_params
 
     def run_transformer(
         self,
@@ -301,7 +301,7 @@ class OctoModelPt:
             rng (Optional[PRNGKey], optional): RNG key for initializing the model.
             dataset_statistics (Optional[Dict[str, Any]], optional): Dataset statistics.
         """
-        module = OctoModule.create(**config["model"])
+        module = OctoModulePt.create(**config["model"])
         
         return cls(
             module=module,

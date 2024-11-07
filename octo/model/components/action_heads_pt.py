@@ -14,6 +14,7 @@ from octo.model.components.tokenizers import BinTokenizer
 from octo.model.components.transformer_pt import MAPHeadPt
 from octo.model.components.unet import ConditionalUnet1D, unet_squaredcos_cap_v2
 from octo.model.components.jax_pt import FromJaxModel
+from octo.model.components.jax_pt import LinearPt
 
 
 class ActionHead(ABC):
@@ -81,8 +82,17 @@ class ContinuousActionHeadPt(nn.Module, ActionHead, FromJaxModel):
         
         if self.use_map:
             self.map_head = MAPHeadPt(self.input_dim)
-        self.mean_proj = nn.Linear(self.input_dim, self.action_horizon * self.action_dim)
+        self.mean_proj = LinearPt(self.input_dim, self.action_horizon * self.action_dim)
 
+    @property
+    def pt_to_jax_args_map(self):
+        pt_to_jax = {
+            'mean_proj': (self.mean_proj.load_jax_weights, 'mean_proj'),
+        }
+        if self.use_map:
+            pt_to_jax['map_head'] = (self.map_head.load_jax_weights, 'map_head')
+        return pt_to_jax
+    
     def forward(
         self, transformer_outputs: Dict[str, TokenGroupPt], train: bool = True
     ) -> torch.tensor:
@@ -256,8 +266,13 @@ class DiffusionActionHeadPt(nn.Module, FromJaxModel):
         # self.register_buffer('alphas', 1 - betas)
         # self.register_buffer('alpha_hats', torch.cumprod(1 - betas, dim=0))
 
-    def load_jax_weights(self, jax_params=None):
-        pass
+    @property
+    def pt_to_jax_args_map(self):
+        # {
+        # pt_module_name: (load_func, jax_param_key),
+        # ...
+        # }
+        return{} 
     
     def forward(
         self,

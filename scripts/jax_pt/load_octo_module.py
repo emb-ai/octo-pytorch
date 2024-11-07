@@ -16,7 +16,7 @@ import jax
 import json
 
 from octo.model.octo_model import OctoModel
-from octo.model.octo_model_pt import OctoModelPt
+from octo.model.octo_model_pt import OctoModelPt, load_np_example_batch, _np2pt
 from octo.utils.spec import ModuleSpec
 from octo.model.octo_module import OctoModule
 from octo.model.octo_module_pt import OctoModulePt
@@ -138,12 +138,14 @@ new_config = {
 module = OctoModulePt.create(**new_config)
 
 model = OctoModelPt(module, text_processor, None, None, None)
-model.load_np_example_batch("hf://rail-berkeley/octo-small-1.5")
+example_batch = load_np_example_batch("hf://rail-berkeley/octo-small-1.5")
+model.example_batch = _np2pt(example_batch)
 
 language_instruction = "pick up the fork"
 tasks_pt = model.create_tasks(texts=[language_instruction] * 10, device=device)
 
-model.module.load_jax_weights(jax_params)
+uninitialized_params, unused_jax_params = model.module.load_jax_weights(jax_params)
+print(uninitialized_params, unused_jax_params)
 model.module.eval()
 model.module.to(device)
 

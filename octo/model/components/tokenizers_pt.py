@@ -7,6 +7,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torchvision.transforms import ToTensor
 import numpy as np
+from scipy.stats import norm
 
 from octo.model.components.base import TokenGroupPt
 from octo.utils.spec import ModuleSpec
@@ -66,10 +67,28 @@ class TokenLearnerPt(nn.Module, FromJaxModel):
         # Apply MAPHead
         return self.map_head(x, train=train)
     
-    def load_jax_weights(self, params):
-        self.layer_norm.load_jax_weights(params['LayerNorm'])
-        self.map_head.load_jax_weights(params['MAPHead'])
-        self.pos_embed = self._get_param(params['pos_embed'])
+    def pt_to_jax_args_map(self):
+        # {
+        # pt_module_name: (load_func, jax_param_key),
+        # ...
+        # }
+        return {
+            "layer_norm": (self.layer_norm.load_jax_weights, 'LayerNorm'),
+            "map_head": (self.map_head.load_jax_weights, 'MAPHead'), 
+            "pos_embed": (self.pos_embed.load_jax_weights, 'pos_embed'), 
+        }
+        
+    @property
+    def pt_to_jax_args_map(self):
+        pt_to_jax_args = {
+            'embedding': (self.embedding.load_jax_weights, 'embedding')
+            # pt_module_name: (load_func, jax_param_key),
+            # ...
+        }
+        for i in range(len(self.layers)):
+            pt_to_jax_args[f'layers.{i}.0'] = (self.layers[i][0].load_jax_weights, f'StdConv_{i}')
+            pt_to_jax_args[f'layers.{i}.1'] = (self.layers[i][1].load_jax_weights, f'GroupNorm_{i}')
+        return pt_to_jax_args
         
 
 
@@ -113,11 +132,24 @@ class ImageTokenizerPt(nn.Module, FromJaxModel):
         
         self.output_dim = self.encoder_def.num_features
         
-    def load_jax_weights(self, jax_params):
-        self.encoder_def.load_jax_weights(jax_params[list(jax_params.keys())[0]])
-        if self.use_token_learner:
-            self.token_learner.load_jax_weights(jax_params['TokenLearner'])
+    # def load_jax_weights(self, jax_params):
+    #     self.encoder_def.load_jax_weights(jax_params[list(jax_params.keys())[0]])
+    #     if self.use_token_learner:
+    #         self.token_learner.load_jax_weights(jax_params['TokenLearner'])
 
+    @property
+    def pt_to_jax_args_map(self):
+        # {
+        # pt_module_name: (load_func, jax_param_key),
+        # ...
+        # }
+        pt_to_jax_args = {
+            'encoder_def': (self.encoder_def.load_jax_weights, 'SmallStem16_0')
+        }
+        if self.use_token_learner:
+            pt_to_jax_args['token_learner'] = (self.token_learner.load_jax_weights, 'TokenLearner')
+        return pt_to_jax_args
+    
     def extract_inputs(self, keys, inputs, check_spatial=False):
         extracted_outputs = []
         for key in keys:
@@ -222,8 +254,13 @@ class LanguageTokenizerPt(nn.Module, FromJaxModel):
                 self.hf_model = AutoModel.from_config(config)
         self.output_dim = self.hf_model.config.d_model
 
-    def load_jax_weights(self, params: None):
-        pass
+    @property
+    def pt_to_jax_args_map(self):
+        # {
+        # pt_module_name: (load_func, jax_param_key),
+        # ...
+        # }
+        return {}    
     
     def forward(
         self,
@@ -292,7 +329,7 @@ class BinTokenizerPt(nn.Module, FromJaxModel):
         elif self.bin_type == "normal":
             # Convert numpy array to torch tensor
             thresholds = torch.from_numpy(
-                norm.ppf(torch.linspace(EPS, 1 - EPS, self.n_bins + 1).numpy())
+                norm.ppf(np.linspace(EPS, 1 - EPS, self.n_bins + 1))
             ).float()
         else:
             raise ValueError(f"Binning type {self.bin_type} not supported in BinTokenizer.")
@@ -300,8 +337,13 @@ class BinTokenizerPt(nn.Module, FromJaxModel):
         # Register thresholds as buffer (non-trainable tensor)
         self.register_buffer('thresholds', thresholds)
 
-    def load_jax_weights(self, jax_params=None):
-        pass
+    @property
+    def pt_to_jax_args_map(self):
+        # {
+        # pt_module_name: (load_func, jax_param_key),
+        # ...
+        # }
+        return {}
     
     def forward(self, inputs: torch.Tensor) -> torch.Tensor:
         if self.bin_type == "uniform":
@@ -344,8 +386,13 @@ class LowdimObsTokenizerPt(BinTokenizerPt):
         self.discretize = discretize
         self.proper_pad_mask = proper_pad_mask
 
-    def load_jax_weights(self, jax_params=None):
-        pass
+    @property
+    def pt_to_jax_args_map(self):
+        # {
+        # pt_module_name: (load_func, jax_param_key),
+        # ...
+        # }
+        return {}
     
     def forward(self, observations, *unused_args, **unused_kwargs) -> TokenGroupPt:
         assert self.obs_keys, "Need to specify observation keys to tokenize."
