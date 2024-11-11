@@ -22,7 +22,7 @@ from octo.model.octo_module_pt import OctoModulePt
 from octo.utils.spec import ModuleSpec
 from octo.utils.typing import Sequence
 from octo.model.octo_module import OctoModule
-
+from octo.utils.train_utils_pt import _flatten_dict, _jax_config_to_pt_config, _np2pt
 class OctoModelPt:
     """Recommended way of interacting with Octo models.
 
@@ -200,7 +200,10 @@ class OctoModelPt:
             text_processor = None
         
         example_batch = _np2pt(example_batch)
-        dataset_statistics = _np2pt(dataset_statistics)
+        
+        dataset_statistics = None
+        if dataset_statistics is not None:
+            dataset_statistics = _np2pt(dataset_statistics)
         
         
         octo_model = cls(
@@ -214,6 +217,156 @@ class OctoModelPt:
 
         return octo_model, params, uninitialized_params, unused_jax_params
 
+    @staticmethod
+    def load_config_and_meta_from_jax(checkpoint_path, return_jax_meta=False):
+        if checkpoint_path.startswith("hf://"):
+            checkpoint_path = _download_from_huggingface(
+                checkpoint_path.removeprefix("hf://")
+            )
+
+        # load config
+        with tf.io.gfile.GFile(
+            tf.io.gfile.join(checkpoint_path, "config.json"), "r"
+        ) as f:
+            config = json.load(f)
+
+        # shim to support old configs
+        if "pred_horizon" in config["model"]["heads"]["action"]["kwargs"]:
+            config["model"]["heads"]["action"]["kwargs"]["action_horizon"] = config[
+                "model"
+            ]["heads"]["action"]["kwargs"].pop("pred_horizon")
+
+        # load dataset statistics
+        dataset_statistics = None
+        with tf.io.gfile.GFile(
+            tf.io.gfile.join(checkpoint_path, "dataset_statistics.json"), "r"
+        ) as f:
+            dataset_statistics = json.load(f)
+        
+        
+        example_batch = load_np_example_batch(checkpoint_path)
+        
+        if config["text_processor"] is not None:
+            text_processor = ModuleSpec.instantiate(config["text_processor"])()
+        else:
+            text_processor = None
+        
+        if return_jax_meta:
+            return {
+                'config': config, 
+                'example_batch': example_batch, 
+                'dataset_statistics': dataset_statistics, 
+                'text_processor': text_processor
+            }
+         
+        config_pt = config
+        config_pt['model'] = _jax_config_to_pt_config(config_pt['model'])
+
+        example_batch_pt = _np2pt(example_batch)
+        
+        dataset_statistics_pt = None
+        if dataset_statistics is not None:
+            dataset_statistics_pt = _np2pt(dataset_statistics)
+            
+        return {
+                'config': config_pt, 
+                'example_batch': example_batch_pt, 
+                'dataset_statistics': dataset_statistics_pt, 
+                'text_processor': text_processor
+            }
+        
+    
+    def load_weights_from_jax(self, checkpoint_path, step: Optional[int] = None,):
+        if checkpoint_path.startswith("hf://"):
+            if step:
+                raise ValueError(
+                    "You can't set config['pretrained_step'] when loading from HuggingFace."
+                )
+            checkpoint_path = _download_from_huggingface(
+                checkpoint_path.removeprefix("hf://")
+            )
+
+        # load config
+        with tf.io.gfile.GFile(
+            tf.io.gfile.join(checkpoint_path, "config.json"), "r"
+        ) as f:
+            config = json.load(f)
+
+        # shim to support old configs
+        if "pred_horizon" in config["model"]["heads"]["action"]["kwargs"]:
+            config["model"]["heads"]["action"]["kwargs"]["action_horizon"] = config[
+                "model"
+            ]["heads"]["action"]["kwargs"].pop("pred_horizon")
+
+        # load example batch
+        with tf.io.gfile.GFile(
+            tf.io.gfile.join(checkpoint_path, "example_batch.msgpack"), "rb"
+        ) as f:
+            example_batch = flax.serialization.msgpack_restore(f.read())
+        # shim for migrating from "tasks" to "task"
+        if "tasks" in example_batch:
+            example_batch["task"] = example_batch.pop("tasks")
+
+        logging.debug(
+            "Model was trained with observations: %s",
+            flax.core.pretty_repr(
+                jax.tree_map(jnp.shape, example_batch["observation"])
+            ),
+        )
+        logging.debug(
+            "Model was trained with tasks: %s",
+            flax.core.pretty_repr(jax.tree_map(jnp.shape, example_batch["task"])),
+        )
+
+        # load dataset statistics
+        with tf.io.gfile.GFile(
+            tf.io.gfile.join(checkpoint_path, "dataset_statistics.json"), "r"
+        ) as f:
+            dataset_statistics = json.load(f)
+            dataset_statistics = jax.tree_map(
+                np.array, dataset_statistics, is_leaf=lambda x: not isinstance(x, dict)
+            )
+
+        # create model def (an OctoModule)
+        module = OctoModule.create(**config["model"])
+        # infer params shape without actually doing any computation
+
+        # shim for old checkpoints
+        if "timestep_pad_mask" not in example_batch["observation"]:
+            example_batch["observation"]["timestep_pad_mask"] = example_batch[
+                "observation"
+            ]["pad_mask"]
+
+        init_args = (
+            example_batch["observation"],
+            example_batch["task"],
+            example_batch["observation"]["timestep_pad_mask"],
+        )
+        params_shape = jax.eval_shape(
+            partial(module.init, train=False), jax.random.PRNGKey(0), *init_args
+        )["params"]
+        # restore params, checking to make sure the shape matches
+        checkpointer = orbax.checkpoint.CheckpointManager(
+            checkpoint_path, orbax.checkpoint.PyTreeCheckpointer()
+        )
+        step = step if step is not None else checkpointer.latest_step()
+        params = checkpointer.restore(step, params_shape)
+
+        uninitialized_params, unused_jax_params = self.module.load_jax_weights(params)
+        
+        if len(uninitialized_params) == 0:
+            logging.warning(f'All parameters were initialized from {checkpoint_path}!')
+        else:
+            logging.warning(f'Following parameters were not initialized from {checkpoint_path}: {uninitialized_params}')
+        
+        if len(unused_jax_params) == 0:
+            logging.warning(f'All weights in {checkpoint_path} were involved in initialization!')
+        else:
+            logging.warning(f'Following parameters in {checkpoint_path} were not involved in initialization: {unused_jax_params}')
+            
+        return uninitialized_params, unused_jax_params
+    
+    
     def run_transformer(
         self,
         observations: dict,
@@ -337,43 +490,6 @@ def load_np_example_batch(checkpoint_path):
             "observation"
         ]["pad_mask"]
     return example_batch
-
-def _jax_config_to_pt_config(config):
-    if isinstance(config, dict):
-        config_pt = {}
-        if 'module' in config:
-            config_pt['args'] = config['args']
-            config_pt['kwargs'] = {key: _jax_config_to_pt_config(val) for key, val in config['kwargs'].items()}
-            config_pt['module'] = config['module'] + '_pt'
-            config_pt['name'] = config['name'] + 'Pt'
-        else:
-            config_pt = {key: _jax_config_to_pt_config(val) for key, val in config.items()}
-        return config_pt
-    else:
-        return config
-
-
-def _np2pt(data, device=None):
-    if isinstance(data, dict):
-        return {key: _np2pt(val, device) for key, val in data.items()}
-    elif isinstance(data, np.ndarray):
-        if len(data.shape) == 4 and data.dtype == np.uint8:
-            data = data.transpose((0, 3, 1, 2)) #NHWC -> NCHW
-        elif len(data.shape) == 5 and data.dtype == np.uint8:
-            data = data.transpose((0, 1, 4, 2, 3)) #NTHWC -> NTCHW
-        t = torch.tensor(data, device=device)
-        return t
-
-def _flatten_dict(d, parent_key: str = '', sep: str ='.'):
-    items = {}
-    for k, v in d.items():
-        # new_key = parent_key + sep + k if parent_key else k
-        new_key = (*parent_key, k) if parent_key else (k,)
-        if isinstance(v, dict):
-            items.update(_flatten_dict(v, new_key, sep=sep).items())
-        else:
-            items[new_key] = v
-    return items
 
 def _verify_shapes(
     data,

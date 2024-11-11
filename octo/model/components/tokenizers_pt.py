@@ -1,7 +1,7 @@
 import logging
 import re
 from typing import Dict, Optional, Sequence
-
+from functools import partial
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -50,16 +50,21 @@ class TokenLearnerPt(nn.Module, FromJaxModel):
         super().__init__()
         self.num_tokens = num_tokens
         self.hid_dim = hid_dim
-        self.max_len = max_len
 
         self.layer_norm = LayerNormPt(hid_dim)
-        self.map_head = MAPHeadPt(num_readouts=self.num_tokens)
+        self.map_head = MAPHeadPt(hid_dim, num_readouts=self.num_tokens)
         pos_embed = torch.randn(max_len, self.hid_dim) * 0.02
-        self.register_parameter('pos_embed', pos_embed) # trainable
+        self.pos_embed = nn.Parameter(pos_embed) # trainable
 
     def forward(self, inputs: torch.Tensor, train: bool = True):
         # Add positional embedding to inputs
-        x = inputs + self.pos_embed
+        bs, t, length = inputs.shape[:3]
+        assert length <= self.pos_embed.shape[0]
+        
+        pos_embed = self.pos_embed[:length]
+        pos_embed = pos_embed.unsqueeze(0).unsqueeze(0).repeat(bs, t, 1, 1)
+        
+        x = inputs + pos_embed
         
         # Apply layer normalization
         x = self.layer_norm(x)
@@ -67,28 +72,17 @@ class TokenLearnerPt(nn.Module, FromJaxModel):
         # Apply MAPHead
         return self.map_head(x, train=train)
     
+    @property
     def pt_to_jax_args_map(self):
         # {
         # pt_module_name: (load_func, jax_param_key),
         # ...
         # }
         return {
-            "layer_norm": (self.layer_norm.load_jax_weights, 'LayerNorm'),
-            "map_head": (self.map_head.load_jax_weights, 'MAPHead'), 
-            "pos_embed": (self.pos_embed.load_jax_weights, 'pos_embed'), 
+            "layer_norm": (self.layer_norm.load_jax_weights, 'LayerNorm_0'),
+            "map_head": (self.map_head.load_jax_weights, 'MAPHead_0'), 
+            "pos_embed": (partial(self._set_terminal_param, strict_shapes=False), 'pos_embed'), 
         }
-        
-    @property
-    def pt_to_jax_args_map(self):
-        pt_to_jax_args = {
-            'embedding': (self.embedding.load_jax_weights, 'embedding')
-            # pt_module_name: (load_func, jax_param_key),
-            # ...
-        }
-        for i in range(len(self.layers)):
-            pt_to_jax_args[f'layers.{i}.0'] = (self.layers[i][0].load_jax_weights, f'StdConv_{i}')
-            pt_to_jax_args[f'layers.{i}.1'] = (self.layers[i][1].load_jax_weights, f'GroupNorm_{i}')
-        return pt_to_jax_args
         
 
 
@@ -126,16 +120,11 @@ class ImageTokenizerPt(nn.Module, FromJaxModel):
         self.task_film_keys = task_film_keys
         self.proper_pad_mask = proper_pad_mask
 
+        
         self.encoder_def = ModuleSpec.instantiate(self.encoder)()
         if self.use_token_learner:
             self.token_learner = TokenLearnerPt(num_tokens=self.num_tokens, hid_dim=self.token_learner_hid_dim)
-        
         self.output_dim = self.encoder_def.num_features
-        
-    # def load_jax_weights(self, jax_params):
-    #     self.encoder_def.load_jax_weights(jax_params[list(jax_params.keys())[0]])
-    #     if self.use_token_learner:
-    #         self.token_learner.load_jax_weights(jax_params['TokenLearner'])
 
     @property
     def pt_to_jax_args_map(self):
@@ -147,7 +136,7 @@ class ImageTokenizerPt(nn.Module, FromJaxModel):
             'encoder_def': (self.encoder_def.load_jax_weights, 'SmallStem16_0')
         }
         if self.use_token_learner:
-            pt_to_jax_args['token_learner'] = (self.token_learner.load_jax_weights, 'TokenLearner')
+            pt_to_jax_args['token_learner'] = (self.token_learner.load_jax_weights, 'TokenLearner_0')
         return pt_to_jax_args
     
     def extract_inputs(self, keys, inputs, check_spatial=False):
@@ -213,8 +202,7 @@ class ImageTokenizerPt(nn.Module, FromJaxModel):
         # image_tokens = image_tokens.reshape(b, t, -1, image_tokens.shape[1])
 
         if self.use_token_learner:
-            raise NotImplementedError
-            # image_tokens = self.token_learner(image_tokens, train=train)
+            image_tokens = self.token_learner(image_tokens, train=train)
 
         if self.proper_pad_mask:
             pad_mask = generate_proper_pad_mask(

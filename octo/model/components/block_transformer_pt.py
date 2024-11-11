@@ -164,7 +164,7 @@ class BlockTransformerPt(nn.Module, FromJaxModel):
 
         input_tokens = self.assemble_input_tokens(prefix_groups, timestep_groups)
         
-        if not self.attention_mask:
+        if self.attention_mask is None:
             attention_mask = self.generate_attention_mask(prefix_groups, timestep_groups)
             attention_mask = attention_mask.repeat(1, self.transformer_kwargs['num_attention_heads'], 1, 1)
             attention_mask = attention_mask.reshape((-1, attention_mask.shape[2], attention_mask.shape[3]))
