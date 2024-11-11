@@ -23,7 +23,6 @@ DEFAULT_PT_JAX_DICT =  {
 }
 
 class FromJaxModel(ABC):
-    STRICT_SHAPES = True
 
     def check_is_main_key_in_params(self, jax_params, key_jax, key_pt=None):
         is_ok = True
@@ -120,14 +119,22 @@ That means you are trying to load weights from the same JAX parameter to many Py
             # pt_module_name: (load_func, jax_param_key),
             # ...
         }
+        
+    @property
+    def num_of_params_to_init(self):
+        return len(self._pt_to_jax_args_map.keys())
     
-    
-    def assign_new_value(self, name: str, parameter: nn.Parameter, module: nn.Module = None):
+    def assign_new_value(self, name: str, parameter: nn.Parameter, module: nn.Module = None, strict_shapes=True):
         old_values = getattr(self, name, None) if module is None else getattr(module, name, None)
         assert old_values is not None, f"No such parameter: {name}"
         
-        if self.STRICT_SHAPES:
-            assert old_values.shape == parameter.shape, f"New value of '{name}' has shape {parameter.shape}, but {old_values.shape} expected"
+        
+        if old_values.shape != parameter.shape:
+            if strict_shapes:
+                raise AssertionError(f"New value of '{name}' in {self.__class__.__name__} has shape {parameter.shape}, but {old_values.shape} expected")
+            else:
+                logging.warning(f'Shape of parameter {name} in {self.__class__.__name__} changed its size: {old_values.shape} -> {parameter.shape}.\n \
+Specify strict_shapes=True to disable automatic shape change.')
         
         if module:
             module.register_parameter(name, nn.Parameter(parameter))
@@ -142,7 +149,7 @@ That means you are trying to load weights from the same JAX parameter to many Py
             
         if isinstance(keys, str):
             if self._check_key(jax_params, keys):
-                return nn.Parameter(torch.tensor(jax_params[keys].copy())), keys
+                return nn.Parameter(torch.tensor(np.array(jax_params[keys]).copy())), keys
             return None, keys
         else:
             key = keys[0]
@@ -155,7 +162,7 @@ That means you are trying to load weights from the same JAX parameter to many Py
                 return value, ret_key
             return None, key
     
-    def _set_terminal_param(self, jax_params, key_jax, key_pt, transform_function=None):
+    def _set_terminal_param(self, jax_params, key_jax, key_pt, transform_function=None, **kwargs):
         if key_jax not in jax_params:
             return [f'{key_pt}'], []
         jax_param = jax_params[key_jax]
@@ -163,9 +170,9 @@ That means you are trying to load weights from the same JAX parameter to many Py
         if transform_function is not None:
             jax_param = transform_function(jax_param)
             
-        weight = torch.from_numpy(jax_param.copy()).float()
+        weight = torch.from_numpy(np.array(jax_param).copy()).float()
         
-        self.assign_new_value(key_pt, nn.Parameter(weight))
+        self.assign_new_value(key_pt, nn.Parameter(weight), **kwargs)
         
         return [], []
     

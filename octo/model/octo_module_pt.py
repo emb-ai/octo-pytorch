@@ -1,6 +1,7 @@
 # Written by Dibya
 import logging
 from typing import Dict, Optional
+from functools import partial
 
 import torch
 import torch.nn as nn
@@ -15,6 +16,7 @@ from octo.model.components.block_transformer_pt import (
     TimestepGroupPt,
     
 )
+from octo.utils.train_utils_pt import _flatten_dict
 
 from octo.utils.spec import ModuleSpec
 from octo.utils.typing import Data, Sequence
@@ -78,11 +80,13 @@ class OctoTransformerPt(nn.Module, FromJaxModel):
                 max_horizon: int,
                 repeat_task_tokens: bool,
                 use_correct_attention: bool = False,
-                num_tokens_dict = {
+                max_horizon_dim: int = 16,
+                num_tokens_dict: Dict[str, int] = {
                     'primary': 256,
                     'wrist': 64,
-                    # 'task_language_pos_embedding': 16,
-                    'language': 16
+                    'language': 16,
+                    'proprio': 1,
+                    'action': 1
                 },
                  ):
         super().__init__()
@@ -94,7 +98,7 @@ class OctoTransformerPt(nn.Module, FromJaxModel):
         self.max_horizon = max_horizon
         self.repeat_task_tokens = repeat_task_tokens
         self.use_correct_attention = use_correct_attention
-        
+        self.max_horizon_dim = max_horizon_dim
         self.transformer_kwargs['token_embedding_size'] = self.token_embedding_size
             
         self.block_transformer = BlockTransformerPt(
@@ -112,23 +116,38 @@ class OctoTransformerPt(nn.Module, FromJaxModel):
             for name, tok in self.observation_tokenizers.items()
         })
         
-        self.pos_embeddings = nn.ModuleDict({
-            f"task_{name}_pos_embedding": AddPositionEmbsPt((num_tokens_dict[name], self.token_embedding_size))
-            for name, tok in self.task_tokenizers.items()
-        })
+        self.pos_embeddings_names = []
+        for name, tok in self.task_tokenizers.items():
+            setattr(self, f"task_{name}_pos_embedding", self._create_positional_embedding((num_tokens_dict[name], self.token_embedding_size)))
+            self.pos_embeddings_names.append(f"task_{name}_pos_embedding")
+        # self.pos_embeddings = nn.ParameterDict({
+        #     f"task_{name}_pos_embedding": self._create_positional_embedding((num_tokens_dict[name], self.token_embedding_size))
+        #     for name, tok in self.task_tokenizers.items()
+        # })
         
-        self.pos_embeddings.update(
-            nn.ModuleDict({
-                f"obs_{name}_pos_embedding": AddPositionEmbsPt((10, num_tokens_dict[name], self.token_embedding_size), history_dim=0)
-                for name, tok in self.observation_tokenizers.items()
-            })
-        )
-        self.pos_embeddings.update(
-            nn.ModuleDict({
-                f"readout_{readout_name}_pos_embedding": AddPositionEmbsPt((10, 1, self.token_embedding_size), history_dim=0)
-                for readout_name in self.readouts
-            })
-        )
+        for name, tok in self.observation_tokenizers.items():
+            setattr(self, f"obs_{name}_pos_embedding", self._create_positional_embedding((self.max_horizon_dim, num_tokens_dict[name], self.token_embedding_size)))
+            self.pos_embeddings_names.append(f"obs_{name}_pos_embedding")
+        # self.pos_embeddings.update(
+        #     nn.ParameterDict({
+        #         f"obs_{name}_pos_embedding": self._create_positional_embedding((self.max_horizon_dim, num_tokens_dict[name], self.token_embedding_size))
+        #         for name, tok in self.observation_tokenizers.items()
+        #     })
+        # )
+        
+        for readout_name in self.readouts:
+            setattr(self, f"readout_{readout_name}_pos_embedding", self._create_positional_embedding((self.max_horizon_dim, num_tokens_dict[readout_name], self.token_embedding_size)))
+            self.pos_embeddings_names.append(f"readout_{readout_name}_pos_embedding")
+        # self.pos_embeddings.update(
+        #     nn.ParameterDict({
+        #         f"readout_{readout_name}_pos_embedding": self._create_positional_embedding((self.max_horizon_dim, num_tokens_dict[readout_name], self.token_embedding_size))
+        #         for readout_name in self.readouts
+        #     })
+        # )
+        
+    def _create_positional_embedding(self, shape):
+        pe = torch.randn(*shape) * 0.02
+        return nn.Parameter(pe)
         
     @property
     def pt_to_jax_args_map(self):
@@ -141,38 +160,51 @@ class OctoTransformerPt(nn.Module, FromJaxModel):
         }
         for name in self.observation_tokenizers:
             jax_param_name = f'observation_tokenizers_{name}'
-            pt_to_jax[jax_param_name] = (
-                self.observation_tokenizers[name].load_jax_weights,
-                jax_param_name
-            )
+            if self.observation_tokenizers[name].num_of_params_to_init > 0:
+                pt_to_jax[jax_param_name] = (
+                    self.observation_tokenizers[name].load_jax_weights,
+                    jax_param_name
+                )
         
         for name in self.task_tokenizers:
             jax_param_name = f'task_tokenizers_{name}'
-            pt_to_jax[jax_param_name] = (
-                self.task_tokenizers[name].load_jax_weights,
-                jax_param_name
-            )
+            if self.task_tokenizers[name].num_of_params_to_init > 0:
+                pt_to_jax[jax_param_name] = (
+                    self.task_tokenizers[name].load_jax_weights,
+                    jax_param_name
+                )
         
         for name in self.task_projections:
-            pt_to_jax[name] = (
-                self.task_projections[name].load_jax_weights,
-                name
-            )
+            if self.task_projections[name].num_of_params_to_init > 0:
+                pt_to_jax[name] = (
+                    self.task_projections[name].load_jax_weights,
+                    name
+                )
             
         for name in self.obs_projections:
-            pt_to_jax[name] = (
-                self.obs_projections[name].load_jax_weights,
-                name
-            )
+            if self.obs_projections[name].num_of_params_to_init > 0:
+                pt_to_jax[name] = (
+                    self.obs_projections[name].load_jax_weights,
+                    name
+                )
             
-        for name in self.pos_embeddings:
+        for name in self.pos_embeddings_names:
             pt_to_jax[name] = (
-                self.pos_embeddings[name]._set_pos_embed_params,
-                name
-            )
-        
+                    partial(self._set_terminal_param, transform_function=lambda x: x[0], strict_shapes=False),
+                    name
+                )
         return pt_to_jax
     
+    def _add_positional_embedding(self, inputs, pe, history_dim=None):
+        bs = inputs.shape[0]
+        if history_dim is not None:
+            history_len = inputs[0].shape[history_dim]
+            pe = pe[(slice(None),) * history_dim + (slice(0, history_len),)]
+        else:
+            assert pe.shape == inputs[0].shape
+            
+        return inputs + pe.unsqueeze(0).expand(bs, *pe.shape)
+            
     def forward(self,
         observations,
         tasks,
@@ -202,7 +234,7 @@ class OctoTransformerPt(nn.Module, FromJaxModel):
 
         batch_size, horizon = next(iter(observations.values())).shape[:2]
         assert horizon <= self.max_horizon, "horizon must be <= max_horizon"
-        assert all(x.shape[1] == horizon for x in observations.values()), \
+        assert all(x.shape[1] == horizon for x in _flatten_dict(observations).values()), \
             "observations must have the same horizon"
 
         #
@@ -243,7 +275,10 @@ class OctoTransformerPt(nn.Module, FromJaxModel):
             # task_tokens shape is (batch, n_tokens, token_embedding_size)
 
             # Add positional embedding
-            task_tokens = self.pos_embeddings[f'{group_name}_pos_embedding'](task_tokens)
+            task_tokens = self._add_positional_embedding(
+                task_tokens, 
+                getattr(self, f'{group_name}_pos_embedding')
+            )
 
             all_prefix_groups.append(
                 PrefixGroupPt(
@@ -270,7 +305,11 @@ class OctoTransformerPt(nn.Module, FromJaxModel):
             # obs_tokens shape is (batch, horizon, n_tokens, token_embedding_size)
 
             # Add positional embedding
-            obs_tokens = self.pos_embeddings[f'{group_name}_pos_embedding'](obs_tokens)
+            obs_tokens = self._add_positional_embedding(
+                obs_tokens, 
+                getattr(self, f'{group_name}_pos_embedding'),
+                history_dim=0
+            )
 
             # Update mask to account for which timesteps are padding
             obs_pad_mask = timestep_pad_mask.unsqueeze(-1) & tokenizer_output.mask
@@ -318,7 +357,11 @@ class OctoTransformerPt(nn.Module, FromJaxModel):
             )
 
             # Add positional embedding
-            readout_tokens = self.pos_embeddings[f'{group_name}_pos_embedding'](readout_tokens)
+            readout_tokens = self._add_positional_embedding(
+                readout_tokens, 
+                getattr(self, f'{group_name}_pos_embedding'),
+                history_dim=0
+            )
             
             readout_mask = torch.ones((batch_size, horizon, n_tokens_for_readout), device=device, dtype=torch.bool)
             readout_attention_rules = {
@@ -382,7 +425,7 @@ class OctoModulePt(nn.Module, FromJaxModel):
     def __init__(self, octo_transformer: OctoTransformerPt, heads: Dict[str, nn.Module]):
         super().__init__()
         self.octo_transformer = octo_transformer
-        self.heads = heads
+        self.heads = nn.ModuleDict(heads)
     
     @property      
     def pt_to_jax_args_map(self):
@@ -410,6 +453,13 @@ class OctoModulePt(nn.Module, FromJaxModel):
         max_horizon: int,
         repeat_task_tokens: bool = False,
         use_correct_attention: bool = False,
+        num_tokens_dict: dict = {
+            'primary': 256,
+            'wrist': 64,
+            'language': 16,
+            'proprio': 1,
+            'action': 1
+        }
     ) -> "OctoModulePt":
         """
         Canonical way to create an OctoModule from configuration.
@@ -448,6 +498,7 @@ class OctoModulePt(nn.Module, FromJaxModel):
             repeat_task_tokens=repeat_task_tokens,
             transformer_kwargs=transformer_kwargs,
             use_correct_attention=use_correct_attention,
+            num_tokens_dict=num_tokens_dict
         )
 
         return cls(
@@ -457,12 +508,28 @@ class OctoModulePt(nn.Module, FromJaxModel):
         
     
     
-    def forward(self, observations, tasks, timestep_pad_mask, train=True, verbose=False):
+    def forward(self, 
+                observations, 
+                tasks, 
+                timestep_pad_mask, 
+                action_pad_mask=None,
+                gt_actions=None,
+                train=True, 
+                verbose=False
+                ):
         transformer_outputs = self.octo_transformer(
             observations, tasks, timestep_pad_mask, train=train, verbose=verbose
         )
         head_outputs = {}
         if self.heads: # TODO: remove if
             for head_name, head in self.heads.items():
-                head_outputs[head_name] = head(transformer_outputs, train=train)
+                if train:
+                    head_outputs[head_name] = head.loss(transformer_outputs, 
+                                                        gt_actions,
+                                                        timestep_pad_mask,
+                                                        action_pad_mask,
+                                                        train=train)
+                else:
+                    head_outputs[head_name] = head(transformer_outputs, train=train)
         return transformer_outputs, head_outputs
+    

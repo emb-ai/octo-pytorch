@@ -50,6 +50,7 @@ class MAPHeadPt(nn.Module, FromJaxModel):
             'attention': (self.attention.load_jax_weights, 'MultiHeadDotProductAttention_0'),
             'layer_norm': (self.layer_norm.load_jax_weights, 'LayerNorm_0'),
             'mlp_block': (self.mlp_block.load_jax_weights, 'MlpBlock_0'),
+            'probe': (self._set_terminal_param, 'probe')
         }
         
     def forward(
@@ -73,6 +74,7 @@ class MAPHeadPt(nn.Module, FromJaxModel):
         # Prepare attention mask if provided
         if mask is not None:
             mask = mask.reshape(-1, l)
+            mask 
             # Convert mask to PyTorch attention mask format
             # PyTorch uses True to mask out values
             attention_mask = ~mask
@@ -84,6 +86,7 @@ class MAPHeadPt(nn.Module, FromJaxModel):
             key=x,
             value=x,
             key_padding_mask=attention_mask if mask is not None else None
+            # key_padding_mask=attention_mask if mask is not None else None
         )
 
         # Apply layer norm and residual connection with MLP
@@ -119,16 +122,8 @@ class AddPositionEmbsPt(nn.Module, FromJaxModel):
         # ...
         # }
         return{
-            # 'pos_embed': (partial(self._set_terminal_param, transform_function = lambda x: x[0]), 'position_embedding')
+            'pos_embed': (partial(self._set_terminal_param, transform_function = lambda x: x[0]), 'pos_embedding')
         } 
-    
-    def _set_pos_embed_params(self, jax_params, key_jax, key_pt): # TODO redo
-        if key_jax not in jax_params:
-            return [f'{key_pt}'], []
-        jax_param = jax_params[key_jax][0]
-        weight = torch.from_numpy(jax_param.copy()).float()
-        self.assign_new_value('pos_embed', nn.Parameter(weight))
-        return [], []
     
     def forward(self, inputs: torch.Tensor) -> torch.Tensor:
         """Applies the AddPositionEmbs module.
