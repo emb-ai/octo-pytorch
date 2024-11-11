@@ -41,7 +41,7 @@ def load_params():
     )
 
 
-    checkpoint_path = Path('/home/jovyan/.cache/huggingface/hub/models--rail-berkeley--octo-small-1.5/snapshots/dc9aa3019f764726c770814b27e4ab0fc6e32a58')
+    checkpoint_path = Path('/home/jovyan/shares/SR006.nfs2/soshin/repo/octo/try_save')
     config_path = checkpoint_path / 'config.json'
     with open(config_path, 'r') as f:
         config = json.load(f)
@@ -93,21 +93,21 @@ new_config = {
             'module': 'octo.model.components.tokenizers_pt',
             'name': 'ImageTokenizerPt'
         },
-        'wrist': {
-            'args': [],
-            'kwargs': {
-                'encoder': {
-                    'args': [],
-                    'kwargs': {},
-                    'module': 'octo.model.components.vit_encoders_pt',
-                    'name': 'SmallStem16Pt'
-                    },
-                'obs_stack_keys': ['image_wrist'],
-                'task_stack_keys': ['image_wrist']
-            },
-            'module': 'octo.model.components.tokenizers_pt',
-            'name': 'ImageTokenizerPt'
-        }
+        # 'wrist': {
+        #     'args': [],
+        #     'kwargs': {
+        #         'encoder': {
+        #             'args': [],
+        #             'kwargs': {},
+        #             'module': 'octo.model.components.vit_encoders_pt',
+        #             'name': 'SmallStem16Pt'
+        #             },
+        #         'obs_stack_keys': ['image_wrist'],
+        #         'task_stack_keys': ['image_wrist']
+        #     },
+        #     'module': 'octo.model.components.tokenizers_pt',
+        #     'name': 'ImageTokenizerPt'
+        # }
     },
     'task_tokenizers': {
         'language': {
@@ -138,7 +138,7 @@ new_config = {
 module = OctoModulePt.create(**new_config)
 
 model = OctoModelPt(module, text_processor, None, None, None)
-example_batch = load_np_example_batch("hf://rail-berkeley/octo-small-1.5")
+example_batch = load_np_example_batch('/home/jovyan/shares/SR006.nfs2/soshin/repo/octo/try_save')
 model.example_batch = _np2pt(example_batch)
 
 language_instruction = "pick up the fork"
@@ -151,6 +151,7 @@ model.module.to(device)
 
 obs = {
     "image_primary": torch.randint(0, 256, (10, 2, 3, 256, 256)).to(device),
+    "timestep_pad_mask" :torch.tensor([[True, True]]).to(device),
     # "image_wrist": torch.randint(0, 256, (10, 2, 3, 128, 128)), 
 }
 

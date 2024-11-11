@@ -17,6 +17,40 @@ from octo.model.components.jax_pt import FromJaxModel
 from octo.model.components.jax_pt import LinearPt
 
 
+def masked_mean(x, mask):
+    # mask = jnp.broadcast_to(mask, x.shape)
+    mask = mask.float()
+    return torch.mean(x * mask) / torch.clip(torch.mean(mask), min=1e-5, max=None)
+
+
+def continuous_loss(
+    pred_value: torch.tensor,
+    ground_truth_value: torch.tensor,
+    mask: torch.tensor,
+    loss_type: str = "mse",
+) -> torch.tensor:
+    """
+    Args:
+        pred_value: shape (batch_dims...)
+        ground_truth_value: continuous values w/ shape (batch_dims...)
+        mask: broadcastable to ground_truth
+    """
+    if loss_type == "mse":
+        loss = torch.square(pred_value - ground_truth_value)
+    elif loss_type == "l1":
+        loss = torch.abs(pred_value - ground_truth_value)
+    else:
+        raise ValueError(f"Invalid loss type: {loss_type}")
+
+    loss = masked_mean(loss, mask)
+
+    mse = torch.square(pred_value - ground_truth_value)
+    mse = masked_mean(mse, mask)
+    return loss, {
+        "loss": loss,
+        "mse": mse,
+    }
+
 class ActionHead(ABC):
     """Action prediction modules that take in the transformer token outputs and predict actions.
 
@@ -140,17 +174,17 @@ class ContinuousActionHeadPt(nn.Module, ActionHead, FromJaxModel):
             metrics: dict
         """
         # # (batch, window_size, action_horizon, action_dim)
-        # mean = self(transformer_outputs, train=train)
+        mean = self(transformer_outputs, train=train)
 
         # # combine the timestep pad mask with the action pad mask
-        # mask = timestep_pad_mask[:, :, None, None] & action_pad_mask
+        mask = timestep_pad_mask[:, :, None, None] & action_pad_mask
 
-        # loss, metrics = continuous_loss(mean, actions, mask, loss_type=self.loss_type)
+        loss, metrics = continuous_loss(mean, actions, mask, loss_type=self.loss_type)
         # # Sum over action dimension instead of averaging
-        # loss = loss * self.action_dim
-        # metrics["loss"] = metrics["loss"] * self.action_dim
-        # metrics["mse"] = metrics["mse"] * self.action_dim
-        # return loss, metrics
+        loss = loss * self.action_dim
+        metrics["loss"] = metrics["loss"] * self.action_dim
+        metrics["mse"] = metrics["mse"].detach() * self.action_dim
+        return loss, metrics
 
     def predict_action(
         self,
@@ -190,16 +224,18 @@ class L1ActionHeadPt(ContinuousActionHeadPt):
     def __init__(self, 
                  input_dim: int,
                 readout_key: str,
+                use_map = True,
                 action_horizon: int = 1,
                 action_dim: int = 7,
+                max_action = 5.0,
     ):
         super().__init__(
             input_dim = input_dim,
             readout_key = readout_key, 
-            use_map = True,
+            use_map = use_map,
             action_horizon = action_horizon,
             action_dim = action_dim,
-            max_action = 5.0,
+            max_action = max_action,
             loss_type = "l1"
         )
         
