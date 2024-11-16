@@ -190,7 +190,7 @@ class OctoTransformerPt(nn.Module, FromJaxModel):
             
         for name in self.pos_embeddings_names:
             pt_to_jax[name] = (
-                    partial(self._set_terminal_param, transform_function=lambda x: x[0], strict_shapes=False),
+                    partial(self._set_terminal_param, transform_function=lambda x: x[0], strict_shapes=True),
                     name
                 )
         return pt_to_jax

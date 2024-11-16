@@ -9,7 +9,7 @@ from torchvision.transforms import ToTensor
 import numpy as np
 from scipy.stats import norm
 
-from octo.model.components.base import TokenGroupPt
+from octo.model.components.base_pt import TokenGroupPt
 from octo.utils.spec import ModuleSpec
 from octo.model.components.jax_pt import FromJaxModel, LayerNormPt
 from octo.model.components.transformer_pt import MAPHeadPt
@@ -46,12 +46,12 @@ class TokenLearnerPt(nn.Module, FromJaxModel):
         dropout_rate (float): Rate of dropout applied in the mapping MLP. Defaults to no dropout.
     """
 
-    def __init__(self, num_tokens: int, hid_dim: int, max_len: int = 5000):
+    def __init__(self, num_tokens: int, hid_dim: int, max_len: int = 256):
         super().__init__()
         self.num_tokens = num_tokens
         self.hid_dim = hid_dim
 
-        self.layer_norm = LayerNormPt(hid_dim)
+        self.layer_norm = LayerNormPt(hid_dim, eps=1e-6)
         self.map_head = MAPHeadPt(hid_dim, num_readouts=self.num_tokens)
         pos_embed = torch.randn(max_len, self.hid_dim) * 0.02
         self.pos_embed = nn.Parameter(pos_embed) # trainable
@@ -81,7 +81,7 @@ class TokenLearnerPt(nn.Module, FromJaxModel):
         return {
             "layer_norm": (self.layer_norm.load_jax_weights, 'LayerNorm_0'),
             "map_head": (self.map_head.load_jax_weights, 'MAPHead_0'), 
-            "pos_embed": (partial(self._set_terminal_param, strict_shapes=False), 'pos_embed'), 
+            "pos_embed": (partial(self._set_terminal_param, strict_shapes=True), 'pos_embed'), 
         }
         
 

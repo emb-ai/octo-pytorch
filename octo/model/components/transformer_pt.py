@@ -5,7 +5,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F 
 
-from octo.model.components.base import TokenGroupPt
+from octo.model.components.base_pt import TokenGroupPt
 from octo.utils.typing import Dtype, PRNGKey, Shape, Union, Tuple
 
 from octo.model.components.jax_pt import FromJaxModel, LinearPt, LayerNormPt
@@ -37,7 +37,7 @@ class MAPHeadPt(nn.Module, FromJaxModel):
             num_heads=num_heads,
             batch_first=True
         )
-        self.layer_norm = LayerNormPt(input_dim)
+        self.layer_norm = LayerNormPt(input_dim, eps=1e-6)
         self.mlp_block = MlpBlockPt(
             input_dim,
             mlp_dim=self.mlp_dim,
@@ -339,7 +339,7 @@ class Encoder1DBlockPt(nn.Module, FromJaxModel):
         self.dropout_rate = dropout_rate
         self.attention_dropout_rate = attention_dropout_rate
 
-        self.layer_norm1 = LayerNormPt(input_dim)
+        self.layer_norm1 = LayerNormPt(input_dim, eps=1e-6)
         self.self_attention = MultiheadAttentionPt(
             embed_dim=input_dim,
             num_heads=num_heads,
@@ -348,7 +348,7 @@ class Encoder1DBlockPt(nn.Module, FromJaxModel):
         )
         self.dropout1 = nn.Dropout(dropout_rate)
 
-        self.layer_norm2 = LayerNormPt(input_dim)
+        self.layer_norm2 = LayerNormPt(input_dim, eps=1e-6)
         self.mlp_block = MlpBlockPt(
             inp_dim=input_dim,
             mlp_dim=mlp_dim,
@@ -442,7 +442,7 @@ class TransformerPt(nn.Module, FromJaxModel):
                 attention_dropout_rate=self.attention_dropout_rate,
             ) for _ in range(self.num_layers)
         ])
-        self.layer_norm = LayerNormPt(self.token_embedding_size)
+        self.layer_norm = LayerNormPt(self.token_embedding_size, eps=1e-6)
 
     def forward(self, x: torch.Tensor, attention_mask: torch.Tensor, train: bool = True) -> torch.Tensor:
         """Applies Transformer model on the inputs.
