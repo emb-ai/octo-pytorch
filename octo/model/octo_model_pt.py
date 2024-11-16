@@ -5,6 +5,7 @@ from typing import Any, Optional, Tuple, Dict
 from octo.utils.typing import Config
 
 import torch
+import torch.nn as nn
 from torch._prims_common import DeviceLikeType
 
 from torchvision.transforms import ToTensor
@@ -15,6 +16,9 @@ import jax.numpy as jnp
 import flax
 import orbax.checkpoint
 
+from pathlib import Path
+import pickle
+
 from octo.data.utils.data_utils import NormalizationType
 from octo.data.utils.text_processing import TextProcessor
 from octo.model.components.action_heads import ActionHead
@@ -22,8 +26,10 @@ from octo.model.octo_module_pt import OctoModulePt
 from octo.utils.spec import ModuleSpec
 from octo.utils.typing import Sequence
 from octo.model.octo_module import OctoModule
-from octo.utils.train_utils_pt import _flatten_dict, _jax_config_to_pt_config, _np2pt
-class OctoModelPt:
+from octo.utils.train_utils_pt import _flatten_dict, _jax_config_to_pt_config, _np2pt, tree_map
+
+
+class OctoModelPt(nn.Module):
     """Recommended way of interacting with Octo models.
 
     TODO
@@ -47,13 +53,13 @@ class OctoModelPt:
         example_batch,
         dataset_statistics
     ):
+        super().__init__()
         self.module = module
         self.text_processor = text_processor
         self.config = config
         self.example_batch = example_batch
         self.dataset_statistics = dataset_statistics
         self.to_tensor = ToTensor()
-        self.device = None
     
     def create_tasks(
         self, 
@@ -70,8 +76,6 @@ class OctoModelPt:
         Omit images to run the language-conditioned model, and omit texts to run the
         goal-conditioned model.
         """
-        if device is None:
-            device = self.device
         
         assert goals is not None or texts is not None
         tasks = {"pad_mask_dict": {}}
@@ -201,9 +205,7 @@ class OctoModelPt:
         
         example_batch = _np2pt(example_batch)
         
-        dataset_statistics = None
-        if dataset_statistics is not None:
-            dataset_statistics = _np2pt(dataset_statistics)
+        dataset_statistics = _np2pt(dataset_statistics)
         
         
         octo_model = cls(
@@ -215,7 +217,23 @@ class OctoModelPt:
         )
         uninitialized_params, unused_jax_params = octo_model.module.load_jax_weights(params)
 
-        return octo_model, params, uninitialized_params, unused_jax_params
+        if len(uninitialized_params) == 0:
+            logging.warning(f'All parameters were initialized from {checkpoint_path}!')
+        else:
+            logging.warning(f'Following parameters were not initialized from {checkpoint_path}: {uninitialized_params}')
+        
+        if len(unused_jax_params) == 0:
+            logging.warning(f'All weights in {checkpoint_path} were involved in initialization!')
+        else:
+            logging.warning(f'Following parameters in {checkpoint_path} were not involved in initialization: {unused_jax_params}')
+            
+        
+        return {
+                'octo_model': octo_model,
+                'params': params,
+                'uninitialized_params': uninitialized_params,
+                'unused_jax_params': unused_jax_params 
+        }
 
     @staticmethod
     def load_config_and_meta_from_jax(checkpoint_path, return_jax_meta=False):
@@ -264,9 +282,7 @@ class OctoModelPt:
 
         example_batch_pt = _np2pt(example_batch)
         
-        dataset_statistics_pt = None
-        if dataset_statistics is not None:
-            dataset_statistics_pt = _np2pt(dataset_statistics)
+        dataset_statistics_pt = _np2pt(dataset_statistics)
             
         return {
                 'config': config_pt, 
@@ -367,12 +383,14 @@ class OctoModelPt:
         return uninitialized_params, unused_jax_params
     
     
-    def run_transformer(
+    def forward(
         self,
         observations: dict,
         tasks: dict,
         timestep_pad_mask: torch.tensor,
         train: bool = False,
+        transformer_only=False,
+        **kwargs
     ):
         """Runs the transformer, but does shape checking on the inputs.
 
@@ -397,14 +415,25 @@ class OctoModelPt:
             tasks,
             timestep_pad_mask,
             train=train,
+            transformer_only=transformer_only,
+            **kwargs
         )
         
-    def to(self, device):
-        self.device = device
-        self.module.to(device)
+    # def to(self, device):
+    #     self.device = device
+    #     self.module.to(device)
     
     def sample_actions(
-        self
+        self,
+        observations: Dict,
+        tasks: Dict,
+        unnormalization_statistics: Optional[Dict] = None,
+        normalization_type: NormalizationType = NormalizationType.NORMAL,
+        timestep_pad_mask: Optional[torch.tensor] = None,
+        train: bool = False,
+        argmax: bool = False,
+        sample_shape: Tuple[int, ...] = (),
+        temperature: float = 1.0,
     ):
         """Samples actions from the model. See `action_heads.py` for more info.
 
@@ -413,13 +442,65 @@ class OctoModelPt:
         Returns:
             TODO
         """
-        pass
+        if timestep_pad_mask is None:
+            timestep_pad_mask = observations["timestep_pad_mask"]
+        transformer_outputs, head_outputs = self(
+            observations, tasks, timestep_pad_mask, train=train,
+            transformer_only=True
+        )
+        action_head = self.module.heads["action"]
+        action = action_head.predict_action(
+            transformer_outputs,
+            train=train,
+            argmax=argmax,
+            sample_shape=sample_shape,
+            temperature=temperature,
+            embodiment_action_dim=len(unnormalization_statistics["mean"])
+            if unnormalization_statistics is not None
+            else None,
+        )
+        action = action.detach().cpu()
+        
+        if unnormalization_statistics is not None:
+            if normalization_type == NormalizationType.NORMAL:
+                mask = unnormalization_statistics.get(
+                    "mask",
+                    torch.ones_like(unnormalization_statistics["mean"].shape, dtype=bool),
+                )
+                
+                unnorm_std = torch.from_numpy(unnormalization_statistics["std"])
+                unnorm_mean = torch.from_numpy(unnormalization_statistics["mean"])
+                unnorm_p01 = torch.from_numpy(unnormalization_statistics["p01"])
+                unnorm_p99 = torch.from_numpy(unnormalization_statistics["p99"])
+                
+                action = action[..., : len(mask)]
+                action = torch.where(
+                    mask,
+                    (action * unnorm_std)
+                    + unnorm_mean,
+                    action,
+                )
+            elif normalization_type == NormalizationType.BOUNDS:
+                mask = unnormalization_statistics.get(
+                    "mask", jnp.ones_like(unnorm_p01, dtype=bool)
+                )
+                action = action[..., : len(mask)]
+                action = jnp.where(
+                    mask,
+                    (action + 1) * (unnorm_p99 - unnorm_p01) / 2 + unnorm_p01, 
+                    action,
+                )
+            else:
+                raise ValueError(f"Unknown normalization type: {normalization_type}")
+        return action
+        
 
     @classmethod
     def load_pretrained(
         cls,
         checkpoint_path: str,
-        step: Optional[int] = None,
+        step: int,
+        optimizer: torch.optim.Optimizer = None,
     ) -> "OctoModelPt":
         """Loads a model from a checkpoint that was saved via `save_pretrained`.
 
@@ -427,12 +508,84 @@ class OctoModelPt:
             checkpoint_path (str): A path to either a directory of checkpoints or a single checkpoint.
             step (int, optional): If multiple checkpoints are present, which one to load. Defaults to the latest.
         """
-        pass
+        checkpoint_path = Path(checkpoint_path)
+        with open(checkpoint_path / "config.json", 'r') as f:
+            config = json.load(f)
+        
+        with open(checkpoint_path / "example_batch.pickle", 'rb') as f:
+            example_batch = pickle.load(f)
+        
+        with open(checkpoint_path / "dataset_statistics.json", 'r') as f:
+            dataset_statistics = json.load(f)
+            dataset_statistics = tree_map(
+                np.array, dataset_statistics, is_leaf=lambda x: not isinstance(x, dict)
+            )
+            dataset_statistics = _np2pt(dataset_statistics)
+        if config["text_processor"] is not None:
+            text_processor = ModuleSpec.instantiate(config["text_processor"])()
+        else:
+            text_processor = None
+        
+        module = OctoModulePt.create(**config["model"])
+        
+        
+        octo_model = cls(
+            module = module,
+            text_processor = text_processor,
+            config = config,
+            example_batch = example_batch,
+            dataset_statistics = dataset_statistics
+        )
+        
+        weights_path = checkpoint_path / f'{step}' / 'weights.pth'
+        checkpoint = torch.load(weights_path, weights_only=True)
+
+        octo_model.load_state_dict(checkpoint['state_dict'])
+        ret = {}
+        ret['octo_model'] = octo_model
+        if optimizer is not None:
+            optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+            ret['optimizer_state_dict'] = optimizer
+        return ret
 
     def save_pretrained(
         self,
+        step: int,
+        checkpoint_path: str,
+        optimizer = None,
     ):
-        pass
+        # save config
+        checkpoint_path = Path(checkpoint_path)
+        checkpoint_path.mkdir(exist_ok = True)
+        if not Path.exists(checkpoint_path / "config.json"):
+            with open(checkpoint_path / "config.json", 'w') as f:
+                json.dump(self.config, f)
+        
+        # save example batch
+        if not Path.exists(checkpoint_path / "example_batch.pickle"):
+            with open(checkpoint_path / "example_batch.pickle", 'wb') as f:
+                pickle.dump(self.example_batch, f)
+        
+        # save dataset statistics
+            
+        if not Path.exists(checkpoint_path / "dataset_statistics.json"):
+            with open(checkpoint_path / "dataset_statistics.json", 'w') as f:
+                json.dump(
+                    tree_map(lambda x: x.tolist(), self.dataset_statistics), 
+                    f
+                )
+        
+        #save wights
+        weights_path = checkpoint_path / f'{step}'
+        weights_path.mkdir(exist_ok = True)
+        save_dict = {
+            'state_dict': self.state_dict(),
+        }
+        if optimizer:
+            save_dict['optimizer_state_dict'] = optimizer.state_dict()
+        torch.save(save_dict, weights_path / 'weights.pth')
+
+        
     
     @classmethod
     def from_config(
