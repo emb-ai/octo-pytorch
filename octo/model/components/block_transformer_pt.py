@@ -11,7 +11,7 @@ import torch.nn as nn
 import einops
 import numpy as np
 
-from octo.model.components.base import TokenGroupPt
+from octo.model.components.base_pt import TokenGroupPt
 from octo.model.components.transformer_pt import TransformerPt
 from octo.model.components.jax_pt import FromJaxModel
 
@@ -164,13 +164,12 @@ class BlockTransformerPt(nn.Module, FromJaxModel):
 
         input_tokens = self.assemble_input_tokens(prefix_groups, timestep_groups)
         
-        if self.attention_mask is None:
-            attention_mask = self.generate_attention_mask(prefix_groups, timestep_groups)
-            attention_mask = attention_mask.repeat(1, self.transformer_kwargs['num_attention_heads'], 1, 1)
-            attention_mask = attention_mask.reshape((-1, attention_mask.shape[2], attention_mask.shape[3]))
-            attention_mask = ~attention_mask
-            self.attention_mask = attention_mask.detach()
-        output = self.transformer(input_tokens, self.attention_mask, train=train)
+        # if self.attention_mask is None:
+        attention_mask = self.generate_attention_mask(prefix_groups, timestep_groups)[:, 0]
+        attention_mask = torch.repeat_interleave(attention_mask, self.transformer_kwargs['num_attention_heads'], dim=0)
+        attention_mask = ~attention_mask
+            # self.attention_mask = attention_mask.detach()
+        output = self.transformer(input_tokens, attention_mask, train=train)
 
         all_prefix_outputs, all_timestep_outputs = self.split_output_tokens(output, prefix_groups, timestep_groups)
         return all_prefix_outputs, all_timestep_outputs
