@@ -8,7 +8,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from octo.model.components.base import TokenGroup, TokenGroupPt
+from octo.model.components.base import TokenGroup
+from octo.model.components.base_pt import TokenGroupPt
 from octo.model.components.diffusion import cosine_beta_schedule, create_diffusion_model
 from octo.model.components.tokenizers import BinTokenizer
 from octo.model.components.transformer_pt import MAPHeadPt
@@ -196,8 +197,9 @@ class ContinuousActionHeadPt(nn.Module, ActionHead, FromJaxModel):
     ) -> torch.tensor:
         """Convenience methods for predicting actions for the final timestep in the window."""
         # only get the last timestep in the window
-        pass
-        # mean = self(transformer_outputs, train=train)[:, -1]
+        
+        mean = self(transformer_outputs, train=train)[:, -1]
+        return mean
         # return jnp.broadcast_to(mean, sample_shape + mean.shape)
 
 

@@ -57,7 +57,7 @@ class FromJaxModel(ABC):
         
             jax_submodule_params = jax_params[key_jax]
         
-        pt_submodule_params = list(self._pt_to_jax_args_map.keys())
+        pt_submodule_params = list(self._pt_to_jax_args_map().keys())
         
         uninitialized_params = []
         unused_jax_params = list(jax_submodule_params.keys())
@@ -67,7 +67,7 @@ class FromJaxModel(ABC):
         
         for pt_submodule_param_name in pt_submodule_params:
             submodule_load_func, jax_submodule_param_key \
-                = self._pt_to_jax_args_map[pt_submodule_param_name]
+                = self._pt_to_jax_args_map()[pt_submodule_param_name]
             
             if not self._check_key(jax_submodule_params, jax_submodule_param_key):
                 uninitialized_params.append(pt_submodule_param_name)
@@ -100,15 +100,21 @@ class FromJaxModel(ABC):
     def _add_key(self, list, key, separator='.'):
         return [f'{key}{separator}{l}' for l in list]
     
-    @property
+    # @property
     def _pt_to_jax_args_map(self):
-        # check correctness
+        __pt_to_jax_dict = getattr(self, '__pt_to_jax_dict', None)
+        if not __pt_to_jax_dict is None:
+            return __pt_to_jax_dict
+        
         pt_to_jax_args = self.pt_to_jax_args_map
         
+        # check correctness
         jax_keys = [val[1] for _, val in pt_to_jax_args.items()]
         if len(jax_keys) > len(set(jax_keys)):
             raise ValueError("JAX keys in pt_to_jax_args_map are not unique. \
 That means you are trying to load weights from the same JAX parameter to many PyTorch parameters.")
+        
+        setattr(self, '__pt_to_jax_dict', pt_to_jax_args)
         
         return pt_to_jax_args
     
@@ -122,7 +128,7 @@ That means you are trying to load weights from the same JAX parameter to many Py
         
     @property
     def num_of_params_to_init(self):
-        return len(self._pt_to_jax_args_map.keys())
+        return len(self._pt_to_jax_args_map().keys())
     
     def assign_new_value(self, name: str, parameter: nn.Parameter, module: nn.Module = None, strict_shapes=True):
         old_values = getattr(self, name, None) if module is None else getattr(module, name, None)
@@ -131,7 +137,8 @@ That means you are trying to load weights from the same JAX parameter to many Py
         
         if old_values.shape != parameter.shape:
             if strict_shapes:
-                raise AssertionError(f"New value of '{name}' in {self.__class__.__name__} has shape {parameter.shape}, but {old_values.shape} expected")
+                raise AssertionError(f"New value of '{name}' in {self.__class__.__name__} has shape {parameter.shape}, but {old_values.shape} expected.\n \
+Set strict_shapes=False to enable automatic shape change.")
             else:
                 logging.warning(f'Shape of parameter {name} in {self.__class__.__name__} changed its size: {old_values.shape} -> {parameter.shape}.\n \
 Specify strict_shapes=True to disable automatic shape change.')

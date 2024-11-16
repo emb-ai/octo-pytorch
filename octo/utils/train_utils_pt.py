@@ -1,7 +1,7 @@
 import re
 import torch
 import torch.nn as nn
-from typing import List
+from typing import List, Any, Callable
 import logging
 import numpy as np
 
@@ -24,6 +24,7 @@ def freeze_weights_pt(
     logging.info(f"Freezing parameters that include the following keys: {frozen_keys}.")
     
     param_names = [name for name, _ in module.named_parameters()]
+    frozen_keys = ['.' + key for key in frozen_keys] # TODO
     selected_params = regex_filter(frozen_keys, param_names)
     
     for p_name, p in module.named_parameters():
@@ -73,8 +74,8 @@ def _np2pt(data, device=None):
             data = data.transpose((0, 3, 1, 2)) #NHWC -> NCHW
         elif len(data.shape) == 5 and data.dtype == np.uint8:
             data = data.transpose((0, 1, 4, 2, 3)) #NTHWC -> NTCHW
-        t = torch.tensor(data, device=device)
-        return t
+    t = torch.tensor(data, device=device)
+    return t
     
 def regex_match(regex_keys, x):
     return any([re.match(r_key, x) for r_key in regex_keys])
@@ -82,3 +83,18 @@ def regex_match(regex_keys, x):
 
 def regex_filter(regex_keys, xs):
     return list(filter(lambda x: regex_match(regex_keys, x), xs))
+
+def tree_map(fn: Callable, tree: dict, is_leaf: Callable[[Any], bool] | None = None) -> dict:
+    """Maps a function over a nested dictionary."""
+    if is_leaf is None:
+        return {k: tree_map(fn, v, is_leaf) if isinstance(v, dict) else fn(v) for k, v in tree.items()}
+    else:
+        ret = {}
+        for k, v in tree.items():
+            if isinstance(v, dict):
+                ret[k] = tree_map(fn, v, is_leaf)
+            elif is_leaf(v):
+                ret[k] = fn(v)
+            else:
+                ret[k] = tree_map(fn, v, is_leaf)
+        return ret

@@ -7,7 +7,7 @@ import torch
 import torch.nn as nn
 
 
-from octo.model.components.base import TokenGroupPt
+from octo.model.components.base_pt import TokenGroupPt
 from octo.model.components.transformer_pt import AddPositionEmbsPt
 from octo.model.components.block_transformer import AttentionRule
 from octo.model.components.block_transformer_pt import (
@@ -80,7 +80,7 @@ class OctoTransformerPt(nn.Module, FromJaxModel):
                 max_horizon: int,
                 repeat_task_tokens: bool,
                 use_correct_attention: bool = False,
-                max_horizon_dim: int = 16,
+                max_horizon_dim: int = 10,
                 num_tokens_dict: Dict[str, int] = {
                     'primary': 256,
                     'wrist': 64,
@@ -515,13 +515,14 @@ class OctoModulePt(nn.Module, FromJaxModel):
                 action_pad_mask=None,
                 gt_actions=None,
                 train=True, 
+                transformer_only=False,
                 verbose=False
                 ):
         transformer_outputs = self.octo_transformer(
             observations, tasks, timestep_pad_mask, train=train, verbose=verbose
         )
         head_outputs = {}
-        if self.heads: # TODO: remove if
+        if self.heads and not transformer_only: # TODO: remove if
             for head_name, head in self.heads.items():
                 if train:
                     head_outputs[head_name] = head.loss(transformer_outputs, 
