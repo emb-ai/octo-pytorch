@@ -18,6 +18,7 @@ import orbax.checkpoint
 
 from pathlib import Path
 import pickle
+from ml_collections import ConfigDict
 
 from octo.data.utils.data_utils import NormalizationType
 from octo.data.utils.text_processing import TextProcessor
@@ -223,9 +224,9 @@ class OctoModelPt(nn.Module):
             logging.warning(f'Following parameters were not initialized from {checkpoint_path}: {uninitialized_params}')
         
         if len(unused_jax_params) == 0:
-            logging.warning(f'All weights in {checkpoint_path} were involved in initialization!')
+            logging.warning(f'Nothing was skipped in {checkpoint_path}!')
         else:
-            logging.warning(f'Following parameters in {checkpoint_path} were not involved in initialization: {unused_jax_params}')
+            logging.warning(f'Following parameters in {checkpoint_path} were skipped in initialization: {unused_jax_params}')
             
         
         return {
@@ -236,7 +237,7 @@ class OctoModelPt(nn.Module):
         }
 
     @staticmethod
-    def load_config_and_meta_from_jax(checkpoint_path, return_jax_meta=False):
+    def load_config_and_meta_from_jax(checkpoint_path, return_jax_meta=False, step: Optional[int] = None):
         if checkpoint_path.startswith("hf://"):
             checkpoint_path = _download_from_huggingface(
                 checkpoint_path.removeprefix("hf://")
@@ -376,9 +377,9 @@ class OctoModelPt(nn.Module):
             logging.warning(f'Following parameters were not initialized from {checkpoint_path}: {uninitialized_params}')
         
         if len(unused_jax_params) == 0:
-            logging.warning(f'All weights in {checkpoint_path} were involved in initialization!')
+            logging.warning(f'Nothing was skipped in {checkpoint_path}!')
         else:
-            logging.warning(f'Following parameters in {checkpoint_path} were not involved in initialization: {unused_jax_params}')
+            logging.warning(f'Following parameters in {checkpoint_path} were skipped in initialization: {unused_jax_params}')
             
         return uninitialized_params, unused_jax_params
     
@@ -561,7 +562,11 @@ class OctoModelPt(nn.Module):
         checkpoint_path.mkdir(exist_ok = True)
         if not Path.exists(checkpoint_path / "config.json"):
             with open(checkpoint_path / "config.json", 'w') as f:
-                json.dump(self.config, f)
+                config_serializable = self.config
+                if isinstance(config_serializable, ConfigDict):
+                    config_serializable = config_serializable.to_dict()
+                config_serializable = tree_map(lambda x: x.tolist(), config_serializable, lambda x: isinstance(x, torch.Tensor))
+                json.dump(config_serializable, f)
         
         # save example batch
         if not Path.exists(checkpoint_path / "example_batch.pickle"):
