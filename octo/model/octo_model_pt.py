@@ -390,6 +390,7 @@ class OctoModelPt(nn.Module):
         timestep_pad_mask: torch.tensor,
         train: bool = False,
         transformer_only=False,
+        save_attention_mask=False,
         **kwargs
     ):
         """Runs the transformer, but does shape checking on the inputs.
@@ -416,6 +417,7 @@ class OctoModelPt(nn.Module):
             timestep_pad_mask,
             train=train,
             transformer_only=transformer_only,
+            save_attention_mask=save_attention_mask,
             **kwargs
         )
         

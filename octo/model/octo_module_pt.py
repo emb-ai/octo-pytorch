@@ -212,6 +212,7 @@ class OctoTransformerPt(nn.Module, FromJaxModel):
         readouts: Optional[Sequence[str]] = None,
         train: bool = False,
         verbose: bool = False,
+        save_attention_mask: bool = False
         ):
         """
         Args:
@@ -323,9 +324,9 @@ class OctoTransformerPt(nn.Module, FromJaxModel):
                 )
             )
         if self.repeat_task_tokens:
-            logging.info(
-                "repeating task tokens at each timestep to perform cross-modal attention"
-            )
+            # logging.info(
+            #     "repeating task tokens at each timestep to perform cross-modal attention"
+            # )
             # get task tokens
             for task in all_prefix_groups:
                 # lang (batch, n_tokens, token_embedding_size)
@@ -389,6 +390,7 @@ class OctoTransformerPt(nn.Module, FromJaxModel):
             all_timestep_groups,
             train=train,
             verbose=verbose,
+            save_attention_mask=save_attention_mask
         )
         outputs = {}
         outputs.update(
@@ -516,10 +518,11 @@ class OctoModulePt(nn.Module, FromJaxModel):
                 gt_actions=None,
                 train=True, 
                 transformer_only=False,
-                verbose=False
+                verbose=False,
+                save_attention_mask=False
                 ):
         transformer_outputs = self.octo_transformer(
-            observations, tasks, timestep_pad_mask, train=train, verbose=verbose
+            observations, tasks, timestep_pad_mask, train=train, verbose=verbose, save_attention_mask=save_attention_mask
         )
         head_outputs = {}
         if self.heads and not transformer_only: # TODO: remove if

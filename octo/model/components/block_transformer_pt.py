@@ -131,6 +131,7 @@ class BlockTransformerPt(nn.Module, FromJaxModel):
         timestep_groups: Sequence[TimestepGroupPt],
         train: bool,
         verbose: bool = False,
+        save_attention_mask: bool = False
     ) -> Tuple[Sequence[PrefixGroupPt], Sequence[TimestepGroupPt]]:
         """
         Args:
@@ -165,7 +166,7 @@ class BlockTransformerPt(nn.Module, FromJaxModel):
         input_tokens = self.assemble_input_tokens(prefix_groups, timestep_groups)
         
         # if self.attention_mask is None:
-        attention_mask = self.generate_attention_mask(prefix_groups, timestep_groups)[:, 0]
+        attention_mask = self.generate_attention_mask(prefix_groups, timestep_groups, save_attention_mask)[:, 0]
         attention_mask = torch.repeat_interleave(attention_mask, self.transformer_kwargs['num_attention_heads'], dim=0)
         attention_mask = ~attention_mask
             # self.attention_mask = attention_mask.detach()
@@ -244,6 +245,7 @@ class BlockTransformerPt(nn.Module, FromJaxModel):
         self,
         prefix_groups: Sequence[PrefixGroupPt],
         timestep_groups: Sequence[TimestepGroupPt],
+        save_attention_mask
     ):
         """
         Args:
@@ -257,51 +259,56 @@ class BlockTransformerPt(nn.Module, FromJaxModel):
         We then combine this with the padding mask to ensure that padding tokens are not attended to.
         """
 
-        if self.enforce_causal:
-            self.verify_causality(prefix_groups, timestep_groups)
+        if self.attention_mask is None:
+            if self.enforce_causal:
+                self.verify_causality(prefix_groups, timestep_groups)
 
-        if not self.use_correct_attention:
-            # No longer used in new models, but keeping for backward compatibility w/ models released in DEcember
-            logging.warning(
-                "Using old attention computation from released December models."
-            )
-            side = "left"
-        else:
-            side = "right"
+            if not self.use_correct_attention:
+                # No longer used in new models, but keeping for backward compatibility w/ models released in DEcember
+                logging.warning(
+                    "Using old attention computation from released December models."
+                )
+                side = "left"
+            else:
+                side = "right"
 
-        def _get_position(i, tokens_per_elem):
-            return np.searchsorted(np.cumsum(tokens_per_elem), i, side=side)
+            def _get_position(i, tokens_per_elem):
+                return np.searchsorted(np.cumsum(tokens_per_elem), i, side=side)
 
-        horizon = timestep_groups[0].tokens.shape[1]
-        tokens_per_prefix_group = [group.tokens.shape[1] for group in prefix_groups]
-        tokens_per_timestep_group = [group.tokens.shape[2] for group in timestep_groups]
+            horizon = timestep_groups[0].tokens.shape[1]
+            tokens_per_prefix_group = [group.tokens.shape[1] for group in prefix_groups]
+            tokens_per_timestep_group = [group.tokens.shape[2] for group in timestep_groups]
 
-        tokens_for_prefix = sum(tokens_per_prefix_group)
-        tokens_per_time_step = sum(tokens_per_timestep_group)
+            tokens_for_prefix = sum(tokens_per_prefix_group)
+            tokens_per_time_step = sum(tokens_per_timestep_group)
 
-        total_tokens = tokens_for_prefix + tokens_per_time_step * horizon
-        attention_mask = torch.zeros((total_tokens, total_tokens), dtype=torch.bool, device=timestep_groups[0].tokens.device)
+            total_tokens = tokens_for_prefix + tokens_per_time_step * horizon
+            attention_mask = torch.zeros((total_tokens, total_tokens), dtype=torch.bool, device=timestep_groups[0].tokens.device)
 
-        def get_token_metadata(i):
-            if i < tokens_for_prefix:
-                position = _get_position(i, tokens_per_prefix_group)
-                return TokenMetadataPt.create(prefix_groups[position], timestep=-1)
+            def get_token_metadata(i):
+                if i < tokens_for_prefix:
+                    position = _get_position(i, tokens_per_prefix_group)
+                    return TokenMetadataPt.create(prefix_groups[position], timestep=-1)
 
-            i -= tokens_for_prefix
-            timestep, i = divmod(i, tokens_per_time_step)
-            position = _get_position(i, tokens_per_timestep_group)
-            return TokenMetadataPt.create(timestep_groups[position], timestep)
+                i -= tokens_for_prefix
+                timestep, i = divmod(i, tokens_per_time_step)
+                position = _get_position(i, tokens_per_timestep_group)
+                return TokenMetadataPt.create(timestep_groups[position], timestep)
 
-        for i in range(total_tokens):  # Token attending
-            for j in range(total_tokens):  # Token being attended to
-                metadata_i = get_token_metadata(i)
-                metadata_j = get_token_metadata(j)
-                mask = int(metadata_i.should_attend_to(metadata_j))
-                attention_mask[i, j] = mask
+            for i in range(total_tokens):  # Token attending
+                for j in range(total_tokens):  # Token being attended to
+                    metadata_i = get_token_metadata(i)
+                    metadata_j = get_token_metadata(j)
+                    mask = int(metadata_i.should_attend_to(metadata_j))
+                    attention_mask[i, j] = mask
+                    
+            if save_attention_mask:
+                self.attention_mask = attention_mask.detach()
 
         pad_attention_mask = self.generate_pad_attention_mask(
             prefix_groups, timestep_groups
         )
+        attention_mask = attention_mask if self.attention_mask is None else self.attention_mask.clone()
         attention_mask = torch.logical_and(torch.tensor(attention_mask), pad_attention_mask)
         return attention_mask
 
