@@ -560,8 +560,9 @@ class UNetDDPMActionHead(nn.Module, FromJaxModel):
             0,
             self.timesteps,
             (batch_size, window_size, 1),
+            device=actions.device,
         )
-        noise = torch.randn(actions.shape)
+        noise = torch.randn(actions.shape, device=actions.device)
 
         # Add noise to the action according to the schedule
         sqrt_alpha_prod = torch.sqrt(self.alphas_cumprod[time[:, None]])  # (B, 1, 1)
@@ -607,6 +608,7 @@ class UNetDDPMActionHead(nn.Module, FromJaxModel):
                 self.action_dim,
             ),
             dtype=bool,
+            device=transformer_outputs[self.readout_key].tokens.device,
         )
 
         if embodiment_action_dim is not None:
@@ -624,6 +626,7 @@ class UNetDDPMActionHead(nn.Module, FromJaxModel):
                 self.action_horizon,
                 self.action_dim,
             ),
+            device=transformer_outputs[self.readout_key].tokens.device,
         )
 
         for i in range(self.timesteps):
@@ -670,9 +673,9 @@ class UNetDDPMActionHead(nn.Module, FromJaxModel):
                 raise ValueError("Invalid schedule provided")
 
             variance = torch.where(
-                time > 0, variance, torch.zeros(eps.shape, dtype=float)
+                time > 0, variance, torch.zeros(eps.shape, dtype=float, device=sample.device)
             )
-            z = torch.randn(shape=sample.shape, dtype=float)
+            z = torch.randn(shape=sample.shape, dtype=float, device=sample.device)
             prev = prev + torch.sqrt(variance) * z
 
             # set non-eval actions to the noise that would have been seen during training
