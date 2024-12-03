@@ -309,7 +309,7 @@ class BlockTransformerPt(nn.Module, FromJaxModel):
             prefix_groups, timestep_groups
         )
         attention_mask = attention_mask if self.attention_mask is None else self.attention_mask.clone()
-        attention_mask = torch.logical_and(torch.tensor(attention_mask), pad_attention_mask)
+        attention_mask = torch.logical_and(attention_mask, pad_attention_mask)
         return attention_mask
 
     def generate_pad_attention_mask(

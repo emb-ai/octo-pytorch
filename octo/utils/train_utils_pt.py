@@ -57,6 +57,9 @@ def _flatten_dict(d, parent_key: str = '', sep: str ='.'):
             items[new_key] = v
     return items
 
+def tree_leaves(d):
+    return list(_flatten_dict(d).values())
+
 def _add_to_dict(d, keys, val):
     if len(keys) == 1:
         key = keys[0]
@@ -97,7 +100,7 @@ def _jax_config_to_pt_config(config):
         return config
 
 
-def _np2pt(data, device=None):
+def _np2pt(data, device=None, dtype=None):
     if isinstance(data, dict):
         return {key: _np2pt(val, device) for key, val in data.items()}
     elif isinstance(data, np.ndarray):
@@ -105,7 +108,7 @@ def _np2pt(data, device=None):
             data = data.transpose((0, 3, 1, 2)) #NHWC -> NCHW
         elif len(data.shape) == 5 and data.dtype == np.uint8:
             data = data.transpose((0, 1, 4, 2, 3)) #NTHWC -> NTCHW
-    t = torch.tensor(data, device=device)
+    t = torch.tensor(data, device=device, dtype=dtype)
     return t
 
 def _to_device(data, device):
@@ -113,6 +116,8 @@ def _to_device(data, device):
         return {key: _to_device(val, device) for key, val in data.items()}
     elif isinstance(data, torch.Tensor):
         return data.to(device)
+    else:
+        raise ValueError(f"Unsupported data type: {type(data)}")
 
 def regex_match(regex_keys, x):
     return any([re.match(r_key, x) for r_key in regex_keys])

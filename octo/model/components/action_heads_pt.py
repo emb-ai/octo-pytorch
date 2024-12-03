@@ -402,6 +402,7 @@ class DiffusionActionHeadPt(nn.Module, FromJaxModel):
         embodiment_action_dim: Optional[int] = None,
         sample_shape: tuple = (),
         generator: torch.Generator = None,
+        **kwargs
     ) -> torch.tensor:
         device=transformer_outputs[self.readout_key].tokens.device
         batch_size, window_size = transformer_outputs[self.readout_key].tokens.shape[:2]

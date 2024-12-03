@@ -27,7 +27,7 @@ from octo.model.octo_module_pt import OctoModulePt
 from octo.utils.spec import ModuleSpec
 from octo.utils.typing import Sequence
 from octo.model.octo_module import OctoModule
-from octo.utils.train_utils_pt import _flatten_dict, _jax_config_to_pt_config, _np2pt, tree_map
+from octo.utils.train_utils_pt import _flatten_dict, _jax_config_to_pt_config, _np2pt, tree_map, tree_leaves
 
 
 class OctoModelPt(nn.Module):
@@ -84,7 +84,7 @@ class OctoModelPt(nn.Module):
             goals_pt = {
                 key: torch.stack([
                     self.to_tensor(goal_i).to(device) for goal_i in goal
-                ], dim=0)  for key, goal in goals.item()
+                ], dim=0)  for key, goal in goals.items()
             }
             
             tasks.update(goals_pt)
@@ -115,7 +115,7 @@ class OctoModelPt(nn.Module):
                 len(texts), dtype=torch.bool, device=device
             )
         else:
-            batch_size = goals[0].shape[0]
+            batch_size = tree_leaves(goals)[0].shape[0]
             tasks["language_instruction"] = [""] * batch_size
             tasks["pad_mask_dict"]["language_instruction"] = np.zeros(
                 batch_size, dtype=bool
@@ -437,7 +437,8 @@ class OctoModelPt(nn.Module):
         argmax: bool = False,
         sample_shape: Tuple[int, ...] = (),
         temperature: float = 1.0,
-        save_attention_mask=True
+        save_attention_mask=True,
+        generator: torch.Generator = None,
     ):
         """Samples actions from the model. See `action_heads.py` for more info.
 
@@ -462,32 +463,40 @@ class OctoModelPt(nn.Module):
             embodiment_action_dim=len(unnormalization_statistics["mean"])
             if unnormalization_statistics is not None
             else None,
+            generator=generator,
         )
         action = action.detach().cpu()
         
         if unnormalization_statistics is not None:
+            
             if normalization_type == NormalizationType.NORMAL:
+                mean = unnormalization_statistics["mean"].float()
+                std = unnormalization_statistics["std"].float()
+                
                 mask = unnormalization_statistics.get(
                     "mask",
-                    torch.ones_like(unnormalization_statistics["mean"], dtype=bool),
+                    torch.ones_like(mean, dtype=bool),
                 )
                 
                 
                 action = action[..., : len(mask)]
                 action = torch.where(
                     mask,
-                    (action * unnormalization_statistics["std"])
-                    + unnormalization_statistics["mean"],
+                    (action * std)
+                    + mean,
                     action,
                 )
             elif normalization_type == NormalizationType.BOUNDS:
+                p01 = unnormalization_statistics["p01"].float()
+                p99 = unnormalization_statistics["p99"].float()
+                
                 mask = unnormalization_statistics.get(
-                    "mask", jnp.ones_like(unnormalization_statistics["p01"], dtype=bool)
+                    "mask", torch.ones_like(p01, dtype=bool)
                 )
                 action = action[..., : len(mask)]
-                action = jnp.where(
+                action = torch.where(
                     mask,
-                    (action + 1) * (unnormalization_statistics["p99"] - unnormalization_statistics["p01"]) / 2 + unnormalization_statistics["p01"], 
+                    (action + 1) * (p99 - p01) / 2 + p01, 
                     action,
                 )
             else:
