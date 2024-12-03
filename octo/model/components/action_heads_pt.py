@@ -17,8 +17,7 @@ from octo.model.components.diffusion_pt import (
 from octo.model.components.tokenizers import BinTokenizer
 from octo.model.components.transformer_pt import MAPHeadPt
 from octo.model.components.unet_pt import ConditionalUnet1D, unet_squaredcos_cap_v2
-from octo.model.components.jax_pt import FromJaxModel
-from octo.model.components.jax_pt import LinearPt
+from octo.model.components.jax_pt import FromJaxModel, LinearPt
 
 
 def masked_mean(x, mask):
@@ -252,9 +251,10 @@ class L1ActionHeadPt(ContinuousActionHeadPt):
 class DiffusionActionHeadPt(nn.Module, FromJaxModel):
     def __init__(
         self,
-        input_dim: int,
         readout_key: str,
+        input_dim: int = 384,
         use_map: bool = False,
+        time_input_dim: int = 1,
         action_horizon: int = 1,
         action_dim: int = 7,
         max_action: float = 5.0,
@@ -282,7 +282,8 @@ class DiffusionActionHeadPt(nn.Module, FromJaxModel):
         self.use_layer_norm = use_layer_norm
         self.diffusion_steps = diffusion_steps
         self.n_diffusion_samples = n_diffusion_samples
-
+        self.time_input_dim = time_input_dim
+        
         # Initialize MAP head if needed
         if self.use_map:
             self.map_head = MAPHeadPt(
@@ -291,6 +292,7 @@ class DiffusionActionHeadPt(nn.Module, FromJaxModel):
 
         self.diffusion_model = create_diffusion_model(
             input_dim=self.input_dim,
+            time_input_dim=self.time_input_dim,
             out_dim=self.action_dim * self.action_horizon,
             time_dim=self.time_dim,
             num_blocks=self.num_blocks,
@@ -309,7 +311,9 @@ class DiffusionActionHeadPt(nn.Module, FromJaxModel):
         # pt_module_name: (load_func, jax_param_key),
         # ...
         # }
-        return {}
+        return {
+            "diffusion_model": (self.diffusion_model.load_jax_weights, "diffusion_model")
+        }
 
     def forward(
         self,
@@ -334,14 +338,14 @@ class DiffusionActionHeadPt(nn.Module, FromJaxModel):
         # Handle initialization case
         if time is None or noisy_actions is None:
             device = embeddings.device
-            time = torch.zeros(*embeddings.shape[:2], 1, device=device)
+            time = torch.zeros(*embeddings.shape[:2], 1, device=device, dtype=torch.float32)
             noisy_actions = torch.zeros(
                 *embeddings.shape[:2],
                 self.action_dim * self.action_horizon,
                 device=device,
             )
 
-        pred_eps = self.diffusion_model(embeddings, noisy_actions, time, train=train)
+        pred_eps = self.diffusion_model(embeddings, noisy_actions, time)
         return pred_eps
 
     def loss(
@@ -397,7 +401,9 @@ class DiffusionActionHeadPt(nn.Module, FromJaxModel):
         train: bool = True,
         embodiment_action_dim: Optional[int] = None,
         sample_shape: tuple = (),
+        generator: torch.Generator = None,
     ) -> torch.tensor:
+        device=transformer_outputs[self.readout_key].tokens.device
         batch_size, window_size = transformer_outputs[self.readout_key].tokens.shape[:2]
         action_mask = torch.ones(
             *sample_shape,
@@ -406,7 +412,7 @@ class DiffusionActionHeadPt(nn.Module, FromJaxModel):
             self.action_horizon,
             self.action_dim,
             dtype=bool,
-            device=transformer_outputs[self.readout_key].tokens.device,
+            device=device,
         )
         if embodiment_action_dim is not None:
             action_mask[..., embodiment_action_dim:] = False
@@ -419,9 +425,11 @@ class DiffusionActionHeadPt(nn.Module, FromJaxModel):
                 window_size,
                 self.action_horizon * self.action_dim,
             ),
+            generator=generator,
+            device=device
         )
         for time in torch.arange(self.diffusion_steps - 1, -1, -1):
-            input_time = torch.broadcast_to(time, (*current_x.shape[:-1], 1))
+            input_time = torch.broadcast_to(time, (*current_x.shape[:-1], 1)).to(device)
             eps_pred = self(
                 transformer_outputs,
                 time=input_time,
@@ -429,13 +437,14 @@ class DiffusionActionHeadPt(nn.Module, FromJaxModel):
                 train=train,
             )
 
-            alpha_1 = 1 / torch.sqrt(self.alpha_hats[time])
-            alpha_2 = (1 - self.alpha_hats[time]) / torch.sqrt(
+            alpha_1 = 1 / torch.sqrt(self.alphas[time])
+            alpha_2 = (1 - self.alphas[time]) / torch.sqrt(
                 1 - self.alpha_hats[time]
             )
             current_x = alpha_1 * (current_x - alpha_2 * eps_pred)
+            
+            z = torch.empty_like(current_x).normal_(generator=generator)
 
-            z = torch.randn_like(current_x)
             current_x = current_x + (time > 0) * (torch.sqrt(self.betas[time]) * z)
             current_x = torch.clip(current_x, -self.max_action, self.max_action)
             current_x = torch.where(

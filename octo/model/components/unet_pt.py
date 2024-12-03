@@ -3,7 +3,7 @@ from typing import Tuple
 import torch.nn as nn
 import torch
 
-default_init = nn.initializers.xavier_uniform
+default_init = nn.init.xavier_uniform
 
 
 def mish(x):

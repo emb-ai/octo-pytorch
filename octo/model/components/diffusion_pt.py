@@ -4,7 +4,9 @@ import logging
 import torch.nn as nn
 import torch
 
-default_init = nn.initializers.xavier_uniform
+from octo.model.components.jax_pt import FromJaxModel, LinearPt, LayerNormPt
+
+default_init = nn.init.xavier_uniform
 
 
 def cosine_beta_schedule(timesteps, s=0.008):
@@ -20,14 +22,14 @@ def cosine_beta_schedule(timesteps, s=0.008):
     return torch.clip(betas, 0, 0.999)
 
 
-class ScoreActor(nn.Module):
+class ScoreActorPt(nn.Module, FromJaxModel):
     def __init__(self, time_preprocess, cond_encoder, reverse_network):
         super().__init__()
         self.time_preprocess = time_preprocess
         self.cond_encoder = cond_encoder
         self.reverse_network = reverse_network
 
-    def forward(self, obs_enc, actions, time, train=False):
+    def forward(self, obs_enc, actions, time):
         """
         Args:
             obs_enc: (bd..., obs_dim) where bd... is broadcastable to batch_dims
@@ -35,7 +37,7 @@ class ScoreActor(nn.Module):
             time: (batch_dims..., 1)
         """
         t_ff = self.time_preprocess(time)
-        cond_enc = self.cond_encoder(t_ff, train=train)
+        cond_enc = self.cond_encoder(t_ff)
         if obs_enc.shape[:-1] != cond_enc.shape[:-1]:
             new_shape = cond_enc.shape[:-1] + (obs_enc.shape[-1],)
             logging.debug(
@@ -44,19 +46,29 @@ class ScoreActor(nn.Module):
             obs_enc = torch.broadcast_to(obs_enc, new_shape)
 
         reverse_input = torch.concatenate([cond_enc, obs_enc, actions], dim=-1)
-        eps_pred = self.reverse_network(reverse_input, train=train)
+        eps_pred = self.reverse_network(reverse_input)
         return eps_pred
 
+    @property
+    def pt_to_jax_args_map(self):
+        # {
+        # pt_module_name: (load_func, jax_param_key),
+        # ...
+        # }
+        return {
+            "time_preprocess": (self.time_preprocess.load_jax_weights, 'time_preprocess'),
+            "cond_encoder": (self.cond_encoder.load_jax_weights, 'cond_encoder'),
+            "reverse_network": (self.reverse_network.load_jax_weights, 'reverse_network')
+        }
 
-class FourierFeatures(nn.Module):
+class FourierFeaturesPt(nn.Module, FromJaxModel):
     def __init__(self, input_size, output_size, learnable=True):
         super().__init__()
         self.output_size = output_size
         self.input_size = input_size
         self.learnable = learnable
         self.w = nn.Parameter(
-            (self.output_size // 2, self.input_size),
-            torch.float32,
+            torch.randn(self.output_size // 2, self.input_size, dtype=torch.float32) * 0.2
         ) # <- nn.initializers.normal(0.2),
 
     def forward(self, x):
@@ -68,38 +80,79 @@ class FourierFeatures(nn.Module):
             f = torch.exp(torch.arange(half_dim) * -f)
             f = x * f
         return torch.concatenate([torch.cos(f), torch.sin(f)], dim=-1)
+    
+    @property
+    def pt_to_jax_args_map(self):
+        # {
+        # pt_module_name: (load_func, jax_param_key),
+        # ...
+        # }
+        return {
+            "w": (self._set_terminal_param, 'kernel')
+        }
 
 
-class MLP(nn.Module):
-    def __init__(self, input_dim, hidden_dims, activation=nn.swish, activate_final=False, use_layer_norm=False, dropout_rate=None):
-        self.layers = nn.Sequential()
+class MLPPt(nn.Module, FromJaxModel):
+    def __init__(self, input_dim, hidden_dims, activation=nn.SiLU(), activate_final=False, use_layer_norm=False, dropout_rate=None):
+        super().__init__()
+        self.use_layer_norm = use_layer_norm
+        self.activate_final = activate_final
+        self.dropout_rate = dropout_rate
+        
+        layers = []
         hidden_dims = [input_dim] + list(hidden_dims)
+        
         for i in range(len(hidden_dims) - 1):
-            self.layers.append(nn.Linear(hidden_dims[i], hidden_dims[i + 1])) # <- , kernel_init=default_init()
+            layers.append(LinearPt(hidden_dims[i], hidden_dims[i + 1])) # <- , kernel_init=default_init()
             if i + 1 < len(hidden_dims) - 1 or activate_final:
                 if dropout_rate is not None and dropout_rate > 0:
-                    self.layers.append(nn.Dropout(rate=dropout_rate))
+                    layers.append(nn.Dropout(rate=dropout_rate))
                 if use_layer_norm:
-                    self.layers.append(nn.LayerNorm())
-                self.layers.append(activation)
+                    layers.append(LayerNormPt(hidden_dims[i + 1]), eps=1e-6)
+                layers.append(activation)
+        self.layers = nn.Sequential(*layers)
 
     def forward(self, x):
         return self.layers(x)
+    
+    @property
+    def pt_to_jax_args_map(self):
+        # {
+        # pt_module_name: (load_func, jax_param_key),
+        # ...
+        # }
+        pt_to_jax_dict = {}
+        i = 0
+        num_layer = 0
+        while i < len(self.layers):
+            pt_to_jax_dict[f"layers.{i}"] = (self.layers[i].load_jax_weights, f"Dense_{num_layer}")
+            i += 1
+            if num_layer + 1 < len(self.layers) - 1 or self.activate_final:
+                if self.dropout_rate is not None and self.dropout_rate > 0:
+                    i += 1
+                if self.use_layer_norm:
+                    pt_to_jax_dict[f"layers.{i}"] = (self.layers[i].load_jax_weights, f"LayerNorm_{num_layer}")
+                    i += 1
+            i += 1
+            num_layer += 1
+                
+        return pt_to_jax_dict
 
 
-class MLPResNetBlock(nn.Module):
+class MLPResNetBlockPt(nn.Module, FromJaxModel):
     def __init__(self, input_dim, features, act, dropout_rate=None, use_layer_norm=False):
         super().__init__()
+        self.input_dim = input_dim
         self.features = features
         self.act = act
         self.dropout_rate = dropout_rate
         self.use_layer_norm = use_layer_norm
-        self.dropout = nn.Dropout(rate=dropout_rate)
-        self.layer_norm = nn.LayerNorm() if use_layer_norm else nn.Identity()
-        self.linear1 = nn.Linear(features, features * 4)
-        self.linear2 = nn.Linear(features * 4, features)
+        self.dropout = nn.Dropout(p=dropout_rate)
+        self.layer_norm = LayerNormPt(input_dim, eps=1e-6) if use_layer_norm else nn.Identity()
+        self.linear1 = LinearPt(features, features * 4)
+        self.linear2 = LinearPt(features * 4, features)
         if input_dim != features:
-            self.residual = nn.Linear(features, input_dim)
+            self.residual = LinearPt(features, input_dim)
         else:
             self.residual = nn.Identity()
 
@@ -115,9 +168,26 @@ class MLPResNetBlock(nn.Module):
         residual = self.residual(residual)
         return residual + x
 
+    @property
+    def pt_to_jax_args_map(self):
+        # {
+        # pt_module_name: (load_func, jax_param_key),
+        # ...
+        # }
+        pt_to_jax_dict = {
+            "linear1": (self.linear1.load_jax_weights, "Dense_0"),
+            "linear2": (self.linear2.load_jax_weights, "Dense_1"),
+        }
+        if self.use_layer_norm:
+            pt_to_jax_dict["layer_norm"] = (self.layer_norm.load_jax_weights, "LayerNorm_0")
+        
+        if self.input_dim != self.features:
+            pt_to_jax_dict["residual"] = (self.residual.load_jax_weights, "Dense_2")
+        
+        return pt_to_jax_dict
 
-class MLPResNet(nn.Module):
-    def __init__(self, input_dim, num_blocks, out_dim, dropout_rate=None, use_layer_norm=False, hidden_dim=256, activation=nn.swish):
+class MLPResNetPt(nn.Module, FromJaxModel):
+    def __init__(self, input_dim, num_blocks, out_dim, dropout_rate=None, use_layer_norm=False, hidden_dim=256, activation=nn.SiLU()):
         super().__init__()
         self.input_dim = input_dim
         self.num_blocks = num_blocks
@@ -126,15 +196,15 @@ class MLPResNet(nn.Module):
         self.use_layer_norm = use_layer_norm
         self.hidden_dim = hidden_dim
         self.activation = activation
-        self.linear1 = nn.Linear(input_dim, hidden_dim) # <- default_init()
+        self.linear1 = LinearPt(input_dim, hidden_dim) # <- default_init()
         self.blocks = nn.Sequential(
-            MLPResNetBlock(input_dim, hidden_dim, activation, dropout_rate, use_layer_norm)
+            MLPResNetBlockPt(hidden_dim, hidden_dim, activation, dropout_rate, use_layer_norm)
         )
 
         for _ in range(num_blocks - 1):
-            self.blocks.append(MLPResNetBlock(hidden_dim, hidden_dim, activation, dropout_rate, use_layer_norm))
+            self.blocks.append(MLPResNetBlockPt(hidden_dim, hidden_dim, activation, dropout_rate, use_layer_norm))
 
-        self.linear2 = nn.Linear(hidden_dim, out_dim) # <- default_init()
+        self.linear2 = LinearPt(hidden_dim, out_dim) # <- default_init()
 
 
 
@@ -145,9 +215,24 @@ class MLPResNet(nn.Module):
         x = self.linear2(x) # <- default_init()
         return x
 
+    @property
+    def pt_to_jax_args_map(self):
+        # {
+        # pt_module_name: (load_func, jax_param_key),
+        # ...
+        # }
+        pt_to_jax_dict = {
+            "linear1": (self.linear1.load_jax_weights, "Dense_0"),
+            "linear2": (self.linear2.load_jax_weights, "Dense_1"),
+        }
+        for i in range(len(self.blocks)):
+            pt_to_jax_dict[f"blocks.{i}"] = (self.blocks[i].load_jax_weights, f"MLPResNetBlock_{i}")
+        
+        return pt_to_jax_dict
 
 def create_diffusion_model(
     input_dim: int,
+    time_input_dim: int,
     out_dim: int,
     time_dim: int,
     num_blocks: int,
@@ -155,11 +240,11 @@ def create_diffusion_model(
     hidden_dim: int,
     use_layer_norm: bool,
 ):
-    return ScoreActor(
-        FourierFeatures(input_dim, time_dim, learnable=True),
-        MLP(input_dim, (2 * time_dim, time_dim)),
-        MLPResNet(
-            input_dim,
+    return ScoreActorPt(
+        FourierFeaturesPt(time_input_dim, time_dim, learnable=True),
+        MLPPt(time_dim, (2 * time_dim, time_dim)),
+        MLPResNetPt(
+            input_dim + out_dim + time_dim,
             num_blocks,
             out_dim,
             dropout_rate=dropout_rate,

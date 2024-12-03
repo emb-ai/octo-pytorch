@@ -107,7 +107,13 @@ def _np2pt(data, device=None):
             data = data.transpose((0, 1, 4, 2, 3)) #NTHWC -> NTCHW
     t = torch.tensor(data, device=device)
     return t
-    
+
+def _to_device(data, device):
+    if isinstance(data, dict):
+        return {key: _to_device(val, device) for key, val in data.items()}
+    elif isinstance(data, torch.Tensor):
+        return data.to(device)
+
 def regex_match(regex_keys, x):
     return any([re.match(r_key, x) for r_key in regex_keys])
 
