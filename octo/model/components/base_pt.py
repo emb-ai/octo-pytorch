@@ -1,5 +1,5 @@
 from octo.utils.typing import Sequence
-
+from octo.model.components.base import TokenGroup
 import torch
 from dataclasses import dataclass
 

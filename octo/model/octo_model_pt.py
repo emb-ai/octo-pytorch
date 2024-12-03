@@ -437,6 +437,7 @@ class OctoModelPt(nn.Module):
         argmax: bool = False,
         sample_shape: Tuple[int, ...] = (),
         temperature: float = 1.0,
+        save_attention_mask=True
     ):
         """Samples actions from the model. See `action_heads.py` for more info.
 
@@ -449,7 +450,7 @@ class OctoModelPt(nn.Module):
             timestep_pad_mask = observations["timestep_pad_mask"]
         transformer_outputs, head_outputs = self(
             observations, tasks, timestep_pad_mask, train=train,
-            transformer_only=True
+            transformer_only=True, save_attention_mask=save_attention_mask
         )
         action_head = self.module.heads["action"]
         action = action_head.predict_action(
@@ -468,29 +469,25 @@ class OctoModelPt(nn.Module):
             if normalization_type == NormalizationType.NORMAL:
                 mask = unnormalization_statistics.get(
                     "mask",
-                    torch.ones_like(unnormalization_statistics["mean"].shape, dtype=bool),
+                    torch.ones_like(unnormalization_statistics["mean"], dtype=bool),
                 )
                 
-                unnorm_std = torch.from_numpy(unnormalization_statistics["std"])
-                unnorm_mean = torch.from_numpy(unnormalization_statistics["mean"])
-                unnorm_p01 = torch.from_numpy(unnormalization_statistics["p01"])
-                unnorm_p99 = torch.from_numpy(unnormalization_statistics["p99"])
                 
                 action = action[..., : len(mask)]
                 action = torch.where(
                     mask,
-                    (action * unnorm_std)
-                    + unnorm_mean,
+                    (action * unnormalization_statistics["std"])
+                    + unnormalization_statistics["mean"],
                     action,
                 )
             elif normalization_type == NormalizationType.BOUNDS:
                 mask = unnormalization_statistics.get(
-                    "mask", jnp.ones_like(unnorm_p01, dtype=bool)
+                    "mask", jnp.ones_like(unnormalization_statistics["p01"], dtype=bool)
                 )
                 action = action[..., : len(mask)]
                 action = jnp.where(
                     mask,
-                    (action + 1) * (unnorm_p99 - unnorm_p01) / 2 + unnorm_p01, 
+                    (action + 1) * (unnormalization_statistics["p99"] - unnormalization_statistics["p01"]) / 2 + unnormalization_statistics["p01"], 
                     action,
                 )
             else:
@@ -502,7 +499,7 @@ class OctoModelPt(nn.Module):
     def load_pretrained(
         cls,
         checkpoint_path: str,
-        step: int,
+        step: int = None,
         optimizer: torch.optim.Optimizer = None,
     ) -> "OctoModelPt":
         """Loads a model from a checkpoint that was saved via `save_pretrained`.
@@ -514,6 +511,13 @@ class OctoModelPt(nn.Module):
         checkpoint_path = Path(checkpoint_path)
         with open(checkpoint_path / "config.json", 'r') as f:
             config = json.load(f)
+        
+        if step is None:
+            subdirs = [f for f in checkpoint_path.iterdir() if f.is_dir()]
+            subdirs = [subdir.name for subdir in subdirs if str(subdir.name).isdigit()]
+            latest_step = max(list(map(int, subdirs)))
+            
+            step = latest_step
         
         with open(checkpoint_path / "example_batch.pickle", 'rb') as f:
             example_batch = pickle.load(f)

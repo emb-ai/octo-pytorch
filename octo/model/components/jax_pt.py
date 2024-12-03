@@ -38,8 +38,6 @@ class FromJaxModel(ABC):
     def load_jax_weights(self, jax_params, key_jax=None, key_pt=None) -> Tuple[List, List]:
         """
         Load JAX weights from jax_params[key] dict. 
-        
-        
 
         Args:
             jax_params (dict): dictionary with JAX weights 
@@ -100,7 +98,6 @@ class FromJaxModel(ABC):
     def _add_key(self, list, key, separator='.'):
         return [f'{key}{separator}{l}' for l in list]
     
-    # @property
     def _pt_to_jax_args_map(self):
         __pt_to_jax_dict = getattr(self, '__pt_to_jax_dict', None)
         if not __pt_to_jax_dict is None:
@@ -197,31 +194,6 @@ Specify strict_shapes=True to disable automatic shape change.')
             return jax_conv_weight.transpose((1, 0))
         return self._set_terminal_param(jax_params, key_jax, key_pt, t)
     
-    # def _get_conv_params(self, jax_conv_params):
-    #     weight = torch.from_numpy(jax_conv_params['kernel'].transpose((3, 2, 0, 1)).copy()).float()
-    #     bias = torch.from_numpy(jax_conv_params['bias'].copy()).float()
-    #     return nn.Parameter(weight), nn.Parameter(bias)
-    
-    # def _get_linear_params(self, jax_linear_params):
-    #     weight = torch.from_numpy(jax_linear_params['kernel'].transpose((1, 0)).copy()).float()
-    #     bias = torch.from_numpy(jax_linear_params['bias'].copy()).float()
-    #     return nn.Parameter(weight), nn.Parameter(bias)
-    
-    
-    # @classmethod
-    # @abstractmethod
-    # def from_jax(cls, jax_config, checkpointer, init_args):
-    #     jax_model = ModuleSpec.instantiate(jax_config)()
-    #     params_shape = jax.eval_shape(
-    #             partial(jax_model.init, train=False), jax.random.PRNGKey(0), *init_args
-    #         )["params"]
-    #     step = checkpointer.latest_step()
-    #     params = checkpointer.restore(step, params_shape)
-    #     instance = cls(jax_module=jax_model, jax_params=params)
-    #     instance.load_jax_weights(params)
-    #     return instance
-        
-    
     def test_forward(self, inputs_pt, inputs_jax, rtol=0.001, atol=0.001):
         raise NotImplementedError
         if self.jax_module is None:
@@ -247,14 +219,8 @@ class LinearPt(nn.Linear, FromJaxModel):
             'bias': (self._set_param, 'bias')
         }
     
-    
-    # def load_jax_weights(self, jax_params, key_jax, key_pt=None) -> Tuple[List, List]:
-    #     return super().load_jax_weights(jax_params, key_jax, key_pt)
-
 class ConvPt(nn.Conv2d, FromJaxModel):
     """Ordinary convolution"""
-    # def load_jax_weights(self, jax_params, key_jax, key_pt=None) -> Tuple[List, List]:
-    #     return super().load_jax_weights(jax_params, key_jax, key_pt)
     
     @property
     def pt_to_jax_args_map(self):
@@ -263,29 +229,6 @@ class ConvPt(nn.Conv2d, FromJaxModel):
             'bias': (self._set_param, 'bias')
         }
 
-
-class LayerNormPt(nn.LayerNorm, FromJaxModel):
-    # def load_jax_weights(self, jax_params, key_jax, key_pt=None) -> Tuple[List, List]:
-    #     return super().load_jax_weights(jax_params, key_jax, key_pt)
-    @property
-    def pt_to_jax_args_map(self):
-        return {
-            'weight': (self._set_param, 'scale'),
-            'bias': (self._set_param, 'bias')
-        }
-    # @property
-    # def pt_to_processor_map_dict(self):
-    #     return {
-    #         'weight': self._get_param,
-    #         'bias': self._get_param
-    #     }
-    
-    # @property
-    # def pt_to_jax_map_dict(self):
-    #     return {
-    #         'weight': 'scale',
-    #         'bias': 'bias'
-    #     }
 
 class GroupNormPt(nn.GroupNorm, FromJaxModel):
     # def load_jax_weights(self, jax_params, key_jax, key_pt=None) -> Tuple[List, List]:
@@ -297,26 +240,10 @@ class GroupNormPt(nn.GroupNorm, FromJaxModel):
             'weight': (self._set_param, 'scale'),
             'bias': (self._set_param, 'bias')
         }
-    
-    # @property
-    # def pt_to_processor_map_dict(self):
-    #     return {
-    #         'weight': self._get_param,
-    #         'bias': self._get_param
-    #     }
-    
-    # @property
-    # def pt_to_jax_map_dict(self):
-    #     return {
-    #         'weight': 'scale',
-    #         'bias': 'bias'
-    #     }
         
 
 class StdConvPt(nn.Conv2d, FromJaxModel):
     """Convolution with weight standardization."""
-    # def load_jax_weights(self, jax_params, key_jax, key_pt=None) -> Tuple[List, List]:
-    #     return super().load_jax_weights(jax_params, key_jax, key_pt)
     
     @property
     def pt_to_jax_args_map(self):
@@ -324,13 +251,6 @@ class StdConvPt(nn.Conv2d, FromJaxModel):
             'weight': (self._set_conv_weight, 'kernel'),
             'bias': (self._set_param, 'bias')
         }
-    
-    # @property
-    # def pt_to_processor_map_dict(self):
-    #     return {
-    #         'weight': self._get_conv_weight,
-    #         'bias': self._get_param
-    #     }
 
     def forward(self, x):
         w = self.weight
@@ -340,8 +260,6 @@ class StdConvPt(nn.Conv2d, FromJaxModel):
 
 
 class LayerNormPt(nn.LayerNorm, FromJaxModel):
-    # def load_jax_weights(self, jax_params, key_jax, key_pt=None) -> Tuple[List, List]:
-    #     return super().load_jax_weights(jax_params, key_jax, key_pt)
     
     @property
     def pt_to_jax_args_map(self):
@@ -349,17 +267,3 @@ class LayerNormPt(nn.LayerNorm, FromJaxModel):
             'weight': (self._set_param, 'scale'),
             'bias': (self._set_param, 'bias')
         }
-    
-    # @property
-    # def pt_to_processor_map_dict(self):
-    #     return {
-    #         'weight': self._get_param,
-    #         'bias': self._get_param
-    #     }
-    
-    # @property
-    # def pt_to_jax_map_dict(self):
-    #     return {
-    #         'weight': 'scale',
-    #         'bias': 'bias'
-    #     }
