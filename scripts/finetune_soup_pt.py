@@ -336,7 +336,7 @@ def main(_):
         
         if distributed_state.is_main_process and (i + 1) % FLAGS.config.log_interval == 0:
             wandb.log(
-                {"train_loss": loss.item(), "learning_rate": lr_sheduler.get_last_lr()}, step=i
+                {"train_loss": loss.item(), "learning_rate": lr_sheduler.get_last_lr()[0]}, step=i
             )
         
 
