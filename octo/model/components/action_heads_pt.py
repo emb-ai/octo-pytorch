@@ -301,9 +301,13 @@ class DiffusionActionHeadPt(nn.Module, FromJaxModel):
             use_layer_norm=self.use_layer_norm,
         )
 
-        self.betas = cosine_beta_schedule(self.diffusion_steps)
-        self.alphas = 1 - self.betas
-        self.alpha_hats = torch.cumprod(self.alphas, dim=0)
+        betas = cosine_beta_schedule(self.diffusion_steps)
+        alphas = 1 - betas
+        alpha_hats = torch.cumprod(alphas, dim=0)
+        self.register_buffer('betas', betas, persistent=False)
+        self.register_buffer('alphas', alphas, persistent=False)
+        self.register_buffer('alpha_hats', alpha_hats, persistent=False)
+        
 
     @property
     def pt_to_jax_args_map(self):
