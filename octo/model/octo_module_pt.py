@@ -424,10 +424,11 @@ class OctoTransformerPt(nn.Module, FromJaxModel):
 
 
 class OctoModulePt(nn.Module, FromJaxModel):
-    def __init__(self, octo_transformer: OctoTransformerPt, heads: Dict[str, nn.Module]):
+    def __init__(self, octo_transformer: OctoTransformerPt, heads: Dict[str, nn.Module], initialize_heads: bool = True):
         super().__init__()
         self.octo_transformer = octo_transformer
         self.heads = nn.ModuleDict(heads)
+        self.initialize_heads = initialize_heads
     
     @property      
     def pt_to_jax_args_map(self):
@@ -438,7 +439,7 @@ class OctoModulePt(nn.Module, FromJaxModel):
         pt_to_jax = {
             "octo_transformer": (self.octo_transformer.load_jax_weights, 'octo_transformer'),
         }
-        if self.heads:
+        if self.heads and self.initialize_heads:
             pt_to_jax["heads"] = (self.heads['action'].load_jax_weights, 'heads_action')
             
         return pt_to_jax
@@ -455,6 +456,7 @@ class OctoModulePt(nn.Module, FromJaxModel):
         max_horizon: int,
         repeat_task_tokens: bool = False,
         use_correct_attention: bool = False,
+        initialize_heads: bool = True,
         num_tokens_dict: dict = {
             'primary': 256,
             'wrist': 64,
@@ -506,6 +508,7 @@ class OctoModulePt(nn.Module, FromJaxModel):
         return cls(
             octo_transformer=model_def,
             heads=head_defs,
+            initialize_heads=initialize_heads
         )
         
     
