@@ -334,6 +334,9 @@ def main(_):
 
         optimizer.step()
         lr_sheduler.step()
+        
+        if i > FLAGS.config.num_steps:
+            break
 
 if __name__ == "__main__":
     app.run(main)
