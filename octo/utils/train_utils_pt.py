@@ -49,8 +49,10 @@ def freeze_weights_pt(
 def _flatten_dict(d, parent_key: str = '', sep: str ='.'):
     items = {}
     for k, v in d.items():
-        # new_key = parent_key + sep + k if parent_key else k
-        new_key = (*parent_key, k) if parent_key else (k,)
+        if sep is None:
+            new_key = (*parent_key, k) if parent_key else (k,)
+        else:
+            new_key = parent_key + sep + k if parent_key else k
         if isinstance(v, dict):
             items.update(_flatten_dict(v, new_key, sep=sep).items())
         else:
