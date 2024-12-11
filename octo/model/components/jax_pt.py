@@ -1,13 +1,16 @@
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from dataclasses import dataclass, asdict
 import logging 
 from functools import partial
+import re
 from octo.utils.typing import Tuple, Any, Union
-from typing import List
+from typing import List, Callable, Optional
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
+from enum import Enum
 
 import jax
 import flax
@@ -16,183 +19,206 @@ import flax.linen as flax_nn
 import numpy as np
 
 from octo.utils.spec import ModuleSpec
+from octo.utils.train_utils_pt import _flatten_dict
 
 DEFAULT_PT_JAX_DICT =  {
     'weight': 'kernel',
     'bias': 'bias'
 }
 
+
+class WeightsCopyingRule(Enum):
+    # Use shape of JAX parameter
+    USE_SOURCE_SHAPE = 'jax_shape' # deprecated
+    
+    # Use shape of Pt parameter.
+    USE_TARGET_SHAPE = 'pt_shape'
+    
+    # JAX and Pt parameter shapes must match.
+    # Otherwise AssertionError is raised
+    STRICT_MATCH = 'strict_shapes'
+    
+    # Do not copy weights
+    SKIP = 'skip_param'
+
+def _add_prefix_to_elems(prefix: str, l: list):
+    return [prefix + elem for elem in l]
+
+def _add_prefix_to_val(prefix: str, d: dict):
+    ret_dict = {}
+    for key, val in d.items():
+        if isinstance(val, str):
+            ret_dict[key] = prefix + val
+        elif isinstance(val, list):
+            ret_dict[key] = _add_prefix_to_elems(prefix, val)
+        else:
+            raise ValueError
+    return ret_dict
+
+def _add_prefix_to_key(prefix: str, d: dict):
+    return {prefix + key: val for key, val in d.items()}
+        
+
 class FromJaxModel(ABC):
-
-    def check_is_main_key_in_params(self, jax_params, key_jax, key_pt=None):
-        is_ok = True
-        if not self._check_key(jax_params, key_jax):
-            is_ok = False
-            uninitialized_params = list(self.pt_to_jax_args_map.keys())
-            if key_pt is not None:
-                uninitialized_params = self._add_key(uninitialized_params, key_pt, separator='.')
-            unused_jax_params = []
-            return is_ok, uninitialized_params, unused_jax_params
-        return is_ok, [], []
+    def get_params_names_dict(self):
+        subtree = {}
+        for key, node in self.pt_to_jax_args_map().items():
+            jax_name = asdict(node)['jax_param_names']
+            if node.is_leaf:
+                subtree[key] = jax_name
+            else:
+                assert isinstance(jax_name, str)
+                subtree.update(_add_prefix_to_key(
+                    f'{key}.',
+                    _add_prefix_to_val(f'{jax_name}/', node.submodule.get_params_names_dict())
+                ))
+        return subtree
     
-    def load_jax_weights(self, jax_params, key_jax=None, key_pt=None) -> Tuple[List, List]:
-        """
-        Load JAX weights from jax_params[key] dict. 
-
-        Args:
-            jax_params (dict): dictionary with JAX weights 
-            key (str, optional): key for dictiona. Defaults to None.
-
-        Returns:
-            Tuple[List, List]: list of uninitialized parameters from `self.pt_to_jax_map_dict`,
-                and list of unused parameters from `jax_params`
-        """
-        jax_submodule_params = jax_params
-        if key_jax is not None:
-            is_ok, uninitialized_params, unused_jax_params = self.check_is_main_key_in_params(jax_params, key_jax, key_pt)
-            if not is_ok:
-                return uninitialized_params, unused_jax_params
+    def get_leaf_properties(self, prop_name):
+        subtree = {}
+        for key, node in self.pt_to_jax_args_map().items():
+            if node.is_leaf:
+                subtree[key] = asdict(node)[prop_name]
+            else:
+                subtree[key] = node.submodule.get_leaf_properties(prop_name)
+        return subtree
+    
+    def get_copying_rule_dict(self):
+        return _flatten_dict(self.get_leaf_properties('copying_rule'))
+    
+    def get_load_func_dict(self):
+        return _flatten_dict(self.get_leaf_properties('load_func'))
+    
+    def load_jax_weights(self, jax_params_dict: dict, skip_keys: list = [], skip_keys_regex: str = None):
+        if len(skip_keys) > 0 and skip_keys_regex is not None:
+            logging.warning("skip_keys and skip_keys_regex are both provided. Next use only skip_keys")
         
-            jax_submodule_params = jax_params[key_jax]
+        state_dict = self.state_dict()
         
-        pt_submodule_params = list(self._pt_to_jax_args_map().keys())
+        if len(skip_keys) == 0 and skip_keys_regex is not None:
+            r = re.compile(skip_keys_regex)
+            skip_keys = list(filter(r.match, state_dict))
+             
+        if len(skip_keys) > 0:
+            logging.info(f"Following keys will be SKIPPED during initialization: {skip_keys}")
         
-        uninitialized_params = []
-        unused_jax_params = list(jax_submodule_params.keys())
+        pt_to_jax_dict = self.get_params_names_dict()
+        jax_keys_to_skip = [pt_to_jax_dict[key] for key in pt_to_jax_dict if key in skip_keys]
         
-        submodules_uninitialized_params = []
-        submodules_unused_jax_params = []
+        pt_to_jax_dict = dict(filter(lambda x: not x[0] in skip_keys, pt_to_jax_dict.items()))
         
-        for pt_submodule_param_name in pt_submodule_params:
-            submodule_load_func, jax_submodule_param_key \
-                = self._pt_to_jax_args_map()[pt_submodule_param_name]
-            
-            if not self._check_key(jax_submodule_params, jax_submodule_param_key):
-                uninitialized_params.append(pt_submodule_param_name)
-                continue
-            unused_jax_params.remove(jax_submodule_param_key)
-                
-            cur_subm_uninit_params, cur_subm_unused = submodule_load_func(
-                jax_submodule_params,
-                jax_submodule_param_key,
-                key_pt = pt_submodule_param_name
+        copying_rules = self.get_copying_rule_dict()
+        copying_functions = self.get_load_func_dict()
+        
+        jax_params_dict_flat = _flatten_dict(jax_params_dict, sep='/')
+        jax_params_dict_flat = dict(filter(lambda x: not x[0] in jax_keys_to_skip, jax_params_dict_flat.items()))
+        
+        new_state_dict = {}
+        
+        for pt_key, jax_keys in pt_to_jax_dict.items():
+            new_state_dict.update(
+                copying_functions[pt_key](
+                    pt_key,
+                    jax_keys,
+                    jax_params_dict_flat,
+                    state_dict,
+                    copying_rules[pt_key]
+                )
             )
-            submodules_uninitialized_params += cur_subm_uninit_params
-            submodules_unused_jax_params += cur_subm_unused
+            
+            if isinstance(jax_keys, list):
+                for jk in jax_keys:
+                    del jax_params_dict_flat[jk]
+            else:
+                del jax_params_dict_flat[jax_keys]
+            
+            # del pt_to_jax_dict[pt_key]
         
-        uninitialized_params += submodules_uninitialized_params
-        unused_jax_params += submodules_unused_jax_params
-        
-        if key_pt is not None:
-            uninitialized_params = self._add_key(uninitialized_params, key_pt, separator='.')
-        if key_jax is not None:
-            unused_jax_params = self._add_key(unused_jax_params, key_jax, separator='/')
-        return uninitialized_params, unused_jax_params
+        missing_keys, unexpected_keys = self.load_state_dict(new_state_dict, strict=False)
+        missing_keys = list(set(missing_keys) - set(skip_keys))
         
     
-    def _check_key(self, param_dict, key):
-        return key in param_dict
-    
-    
-    
-    def _add_key(self, list, key, separator='.'):
-        return [f'{key}{separator}{l}' for l in list]
-    
-    def _pt_to_jax_args_map(self):
-        __pt_to_jax_dict = getattr(self, '__pt_to_jax_dict', None)
-        if not __pt_to_jax_dict is None:
-            return __pt_to_jax_dict
+        skipped_keys = jax_params_dict_flat.keys()
         
-        pt_to_jax_args = self.pt_to_jax_args_map
+        if len(missing_keys) == 0:
+            logging.info("All parameters were successfully initialized!")
+        else:
+            logging.warning(f"Following parameters were not initialized ({len(missing_keys)} total): {missing_keys}")
+            
+        if len(skipped_keys) > 0:
+            logging.warning(f"Following JAX parameters were skipped during initialized ({len(skipped_keys)} total): {skipped_keys}")
         
-        # check correctness
-        jax_keys = [val[1] for _, val in pt_to_jax_args.items()]
-        if len(jax_keys) > len(set(jax_keys)):
-            raise ValueError("JAX keys in pt_to_jax_args_map are not unique. \
-That means you are trying to load weights from the same JAX parameter to many PyTorch parameters.")
+        if len(unexpected_keys) > 0:
+            logging.warning(f"Following Pt parameters were unexpected during loading ({len(unexpected_keys)} total): {unexpected_keys}")
         
-        setattr(self, '__pt_to_jax_dict', pt_to_jax_args)
-        
-        return pt_to_jax_args
-    
-    @property
+        return missing_keys, skipped_keys, unexpected_keys
+
     @abstractmethod
     def pt_to_jax_args_map(self):
         return {
-            # pt_module_name: (load_func, jax_param_key),
+            # pt_module_name: ParamNode(jax_param_names, load_func, submodule)
             # ...
-        }
-        
-    @property
-    def num_of_params_to_init(self):
-        return len(self._pt_to_jax_args_map().keys())
+        } 
     
-    def assign_new_value(self, name: str, parameter: nn.Parameter, module: nn.Module = None, strict_shapes=True):
-        old_values = getattr(self, name, None) if module is None else getattr(module, name, None)
-        assert old_values is not None, f"No such parameter: {name}"
-        
-        
-        if old_values.shape != parameter.shape:
-            if strict_shapes:
-                raise AssertionError(f"New value of '{name}' in {self.__class__.__name__} has shape {parameter.shape}, but {old_values.shape} expected.\n \
-Set strict_shapes=False to enable automatic shape change.")
-            else:
-                logging.warning(f'Shape of parameter {name} in {self.__class__.__name__} changed its size: {old_values.shape} -> {parameter.shape}.\n \
-Specify strict_shapes=True to disable automatic shape change.')
-        
-        if module:
-            module.register_parameter(name, nn.Parameter(parameter))
+    def _set_terminal_param(
+        self, 
+        pt_param_name: str, 
+        jax_param_names: Union[str, List[str]], 
+        jax_params: dict, 
+        state_dict_pt: dict, 
+        copying_rule: WeightsCopyingRule, 
+        transform_function: Callable = None
+    ):
+        if isinstance(jax_param_names, list):
+            cur_param = tuple(jax_params[k] for k in jax_param_names)
+        elif isinstance(jax_param_names, str):
+            cur_param = jax_params[jax_param_names]
         else:
-            self.register_parameter(name, nn.Parameter(parameter))        
-        
-    def _get_param(self, jax_params, keys: Union[str, Tuple[str]]):
-        jax_params = jax_params.copy()
-        
-        if isinstance(keys, tuple) and len(keys) == 1:
-            keys = keys[0]
-            
-        if isinstance(keys, str):
-            if self._check_key(jax_params, keys):
-                return nn.Parameter(torch.tensor(np.array(jax_params[keys]).copy())), keys
-            return None, keys
-        else:
-            key = keys[0]
-            keys = keys[1:]
-            if self._check_key(jax_params, key):
-                if len(keys) == 1:
-                    keys = keys[0]
-                value, ret_key = self._get_param(jax_params[key], keys)
-                ret_key = f'{key}/{ret_key}'
-                return value, ret_key
-            return None, key
-    
-    def _set_terminal_param(self, jax_params, key_jax, key_pt, transform_function=None, **kwargs):
-        if key_jax not in jax_params:
-            return [f'{key_pt}'], []
-        jax_param = jax_params[key_jax]
+            raise ValueError
         
         if transform_function is not None:
-            jax_param = transform_function(jax_param)
+            cur_param = transform_function(cur_param)
             
-        weight = torch.from_numpy(np.array(jax_param).copy()).float()
+        weight = torch.from_numpy(np.array(cur_param).copy()).float()
         
-        self.assign_new_value(key_pt, nn.Parameter(weight), **kwargs)
+        # old_values = getattr(self, pt_param_name, None)
+        old_values = state_dict_pt.get(pt_param_name, None)
+        assert old_values is not None, f"No such parameter: {pt_param_name}"
         
-        return [], []
+        if copying_rule == WeightsCopyingRule.STRICT_MATCH:
+            if old_values.shape != weight.shape:
+                raise AssertionError(f"New value of '{pt_param_name}' has shape {weight.shape}, but {old_values.shape} expected")
+        
+        elif copying_rule == WeightsCopyingRule.USE_TARGET_SHAPE:
+            if old_values.dim() != weight.dim():
+                raise AssertionError(f"Shapes of '{pt_param_name}' and {weight.shape} are incompatible: {old_values.dim()} and {weight.dim()} has different number if dimensions")
+
+            weight = self._copy_weights_with_diff_shapes(weight, old_values.clone())
+            logging.info(f"Copying weights: {jax_param_names} (shape: {weight.shape}) -> {pt_param_name} (shape: {old_values.shape})")
+            
+        elif copying_rule == WeightsCopyingRule.SKIP:
+            weight = old_values
+            
+        else:
+            raise ValueError(f"Copying rule {copying_rule} is not supported")
+        
+        return {pt_param_name: weight}
     
-    
-    def _set_param(self, jax_params, key_jax, key_pt):
-        return self._set_terminal_param(jax_params, key_jax, key_pt, None)
-    
-    def _set_conv_weight(self, jax_params, key_jax, key_pt):
-        def t(jax_conv_weight):
-            return jax_conv_weight.transpose((3, 2, 0, 1))
-        return self._set_terminal_param(jax_params, key_jax, key_pt, t)
-    
-    def _set_linear_weight(self, jax_params, key_jax, key_pt):
-        def t(jax_conv_weight):
-            return jax_conv_weight.transpose((1, 0))
-        return self._set_terminal_param(jax_params, key_jax, key_pt, t)
+    def _copy_weights_with_diff_shapes(self, src: torch.tensor, dst: torch.tensor):
+        dst_slice = []
+        src_slice = []
+        for idx in np.array(dst.shape) - np.array(src.shape):
+            if idx == 0:
+                dst_slice.append(slice(None))
+                src_slice.append(slice(None))
+            if idx > 0:
+                dst_slice.append(slice(0, -idx))
+                src_slice.append(slice(None))
+            if idx < 0:
+                dst_slice.append(slice(None))
+                src_slice.append(slice(0, idx))
+        dst[dst_slice] = src[src_slice]
+        return dst
     
     def test_forward(self, inputs_pt, inputs_jax, rtol=0.001, atol=0.001):
         raise NotImplementedError
@@ -209,47 +235,85 @@ Specify strict_shapes=True to disable automatic shape change.')
         is_masks_equal = np.all(output_pt.to_numpy().mask == output_jax.mask)
         
         return is_tokens_equal & is_masks_equal
-        
+
+
+@dataclass
+class ParamNode:
+    jax_param_names: Union[str, List[str]]
+    load_func: Callable = None
+    submodule: FromJaxModel = None
+    copying_rule: WeightsCopyingRule = WeightsCopyingRule.STRICT_MATCH
+    
+    def __post_init__(self):
+        if self.load_func is None and self.submodule is None:
+            raise ValueError("ParamNode is either leaf node (load_func is not None and submodule is None) or non-leaf (load_func is None and submodule is not None)")
+        if self.load_func is not None and self.submodule is not None:
+            raise ValueError("ParamNode is either leaf node (load_func is not None and submodule is None) or non-leaf (load_func is None and submodule is not None)")
+    
+    @property
+    def is_leaf(self):
+        return self.submodule is None
+
+
+def _transpose_matrix(jax_linear_weight):
+    return jax_linear_weight.transpose((1, 0))
+
+def _transpose_conv_kernel(jax_conv_weight):
+        return jax_conv_weight.transpose((3, 2, 0, 1))
+
 class LinearPt(nn.Linear, FromJaxModel):
     """Linear Layer"""
-    @property
+    
     def pt_to_jax_args_map(self):
         return {
-            'weight': (self._set_linear_weight, 'kernel'),
-            'bias': (self._set_param, 'bias')
+            'weight': ParamNode(
+                load_func=partial(
+                    self._set_terminal_param, 
+                    transform_function=_transpose_matrix
+                ), 
+                jax_param_names='kernel'
+            ),
+            'bias': ParamNode(load_func=self._set_terminal_param, jax_param_names='bias')
         }
     
 class ConvPt(nn.Conv2d, FromJaxModel):
     """Ordinary convolution"""
     
-    @property
     def pt_to_jax_args_map(self):
         return {
-            'weight': (self._set_conv_weight, 'kernel'),
-            'bias': (self._set_param, 'bias')
+           'weight': ParamNode(
+                load_func=partial(
+                    self._set_terminal_param, 
+                    transform_function=_transpose_conv_kernel 
+                ), 
+                jax_param_names='kernel'
+            ),
+            'bias': ParamNode(load_func=self._set_terminal_param, jax_param_names='bias')
         }
 
 
 class GroupNormPt(nn.GroupNorm, FromJaxModel):
-    # def load_jax_weights(self, jax_params, key_jax, key_pt=None) -> Tuple[List, List]:
-    #     return super().load_jax_weights(jax_params, key_jax, key_pt)
     
-    @property
     def pt_to_jax_args_map(self):
         return {
-            'weight': (self._set_param, 'scale'),
-            'bias': (self._set_param, 'bias')
+            'weight': ParamNode(load_func=self._set_terminal_param, jax_param_names='scale'),
+            'bias': ParamNode(load_func=self._set_terminal_param, jax_param_names='bias')
         }
         
 
 class StdConvPt(nn.Conv2d, FromJaxModel):
     """Convolution with weight standardization."""
     
-    @property
     def pt_to_jax_args_map(self):
         return {
-            'weight': (self._set_conv_weight, 'kernel'),
-            'bias': (self._set_param, 'bias')
+            'weight': ParamNode(
+                load_func=partial(
+                    self._set_terminal_param, 
+                    transform_function=_transpose_conv_kernel 
+                ), 
+                jax_param_names='kernel'
+            ),
+            'bias': ParamNode(load_func=self._set_terminal_param, jax_param_names='bias')
         }
 
     def forward(self, x):
@@ -261,9 +325,8 @@ class StdConvPt(nn.Conv2d, FromJaxModel):
 
 class LayerNormPt(nn.LayerNorm, FromJaxModel):
     
-    @property
     def pt_to_jax_args_map(self):
         return {
-            'weight': (self._set_param, 'scale'),
-            'bias': (self._set_param, 'bias')
+            'weight': ParamNode(load_func=self._set_terminal_param, jax_param_names='scale'),
+            'bias': ParamNode(load_func=self._set_terminal_param, jax_param_names='bias')
         }

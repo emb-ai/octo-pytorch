@@ -11,7 +11,7 @@ from scipy.stats import norm
 
 from octo.model.components.base_pt import TokenGroupPt
 from octo.utils.spec import ModuleSpec
-from octo.model.components.jax_pt import FromJaxModel, LayerNormPt
+from octo.model.components.jax_pt import FromJaxModel, LayerNormPt, ParamNode
 from octo.model.components.transformer_pt import MAPHeadPt
 EPS = 1e-6
 
@@ -72,16 +72,15 @@ class TokenLearnerPt(nn.Module, FromJaxModel):
         # Apply MAPHead
         return self.map_head(x, train=train)
     
-    @property
     def pt_to_jax_args_map(self):
         # {
         # pt_module_name: (load_func, jax_param_key),
         # ...
         # }
         return {
-            "layer_norm": (self.layer_norm.load_jax_weights, 'LayerNorm_0'),
-            "map_head": (self.map_head.load_jax_weights, 'MAPHead_0'), 
-            "pos_embed": (partial(self._set_terminal_param, strict_shapes=True), 'pos_embed'), 
+            "layer_norm": ParamNode(submodule=self.layer_norm, jax_param_names='LayerNorm_0'),
+            "map_head": ParamNode(submodule=self.map_head, jax_param_names='MAPHead_0'), 
+            "pos_embed": ParamNode(load_func=self._set_terminal_param, jax_param_names='pos_embed'), 
         }
         
 
@@ -126,17 +125,16 @@ class ImageTokenizerPt(nn.Module, FromJaxModel):
             self.token_learner = TokenLearnerPt(num_tokens=self.num_tokens, hid_dim=self.token_learner_hid_dim)
         self.output_dim = self.encoder_def.num_features
 
-    @property
     def pt_to_jax_args_map(self):
         # {
         # pt_module_name: (load_func, jax_param_key),
         # ...
         # }
         pt_to_jax_args = {
-            'encoder_def': (self.encoder_def.load_jax_weights, 'SmallStem16_0')
+            'encoder_def': ParamNode(submodule=self.encoder_def, jax_param_names='SmallStem16_0')
         }
         if self.use_token_learner:
-            pt_to_jax_args['token_learner'] = (self.token_learner.load_jax_weights, 'TokenLearner_0')
+            pt_to_jax_args['token_learner'] = ParamNode(submodule=self.token_learner, jax_param_names='TokenLearner_0')
         return pt_to_jax_args
     
     def extract_inputs(self, keys, inputs, check_spatial=False):
@@ -242,7 +240,6 @@ class LanguageTokenizerPt(nn.Module, FromJaxModel):
                 self.hf_model = AutoModel.from_config(config)
         self.output_dim = self.hf_model.config.d_model
 
-    @property
     def pt_to_jax_args_map(self):
         # {
         # pt_module_name: (load_func, jax_param_key),
@@ -325,7 +322,6 @@ class BinTokenizerPt(nn.Module, FromJaxModel):
         # Register thresholds as buffer (non-trainable tensor)
         self.register_buffer('thresholds', thresholds)
 
-    @property
     def pt_to_jax_args_map(self):
         # {
         # pt_module_name: (load_func, jax_param_key),
@@ -374,7 +370,6 @@ class LowdimObsTokenizerPt(BinTokenizerPt):
         self.discretize = discretize
         self.proper_pad_mask = proper_pad_mask
 
-    @property
     def pt_to_jax_args_map(self):
         # {
         # pt_module_name: (load_func, jax_param_key),

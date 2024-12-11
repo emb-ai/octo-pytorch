@@ -20,7 +20,7 @@ from octo.utils.train_utils_pt import _flatten_dict
 
 from octo.utils.spec import ModuleSpec
 from octo.utils.typing import Data, Sequence
-from octo.model.components.jax_pt import FromJaxModel, LinearPt
+from octo.model.components.jax_pt import FromJaxModel, LinearPt, ParamNode
 
 class OctoTransformerPt(nn.Module, FromJaxModel):
     """
@@ -148,50 +148,45 @@ class OctoTransformerPt(nn.Module, FromJaxModel):
     def _create_positional_embedding(self, shape):
         pe = torch.randn(*shape) * 0.02
         return nn.Parameter(pe)
-        
-    @property
+         
+    
     def pt_to_jax_args_map(self):
         # {
         # pt_module_name: (load_func, jax_param_key),
         # ...
         # }
         pt_to_jax = {
-            "block_transformer": (self.block_transformer.load_jax_weights, 'BlockTransformer_0')
+            "block_transformer": ParamNode(submodule=self.block_transformer, jax_param_names='BlockTransformer_0')
         }
         for name in self.observation_tokenizers:
-            jax_param_name = f'observation_tokenizers_{name}'
-            if self.observation_tokenizers[name].num_of_params_to_init > 0:
-                pt_to_jax[jax_param_name] = (
-                    self.observation_tokenizers[name].load_jax_weights,
-                    jax_param_name
-                )
+            # if self.observation_tokenizers[name].num_of_params_to_init > 0:
+            pt_to_jax[f'observation_tokenizers.{name}'] = ParamNode(
+                submodule=self.observation_tokenizers[name],
+                jax_param_names=f'observation_tokenizers_{name}'
+            )
         
         for name in self.task_tokenizers:
-            jax_param_name = f'task_tokenizers_{name}'
-            if self.task_tokenizers[name].num_of_params_to_init > 0:
-                pt_to_jax[jax_param_name] = (
-                    self.task_tokenizers[name].load_jax_weights,
-                    jax_param_name
-                )
+            pt_to_jax[f'task_tokenizers.{name}'] = ParamNode(
+                submodule=self.task_tokenizers[name],
+                jax_param_names=f'task_tokenizers_{name}'
+            )
         
         for name in self.task_projections:
-            if self.task_projections[name].num_of_params_to_init > 0:
-                pt_to_jax[name] = (
-                    self.task_projections[name].load_jax_weights,
-                    name
-                )
+            pt_to_jax[f'task_projections.' + name] = ParamNode(
+                submodule=self.task_projections[name],
+                jax_param_names=name
+            )
             
         for name in self.obs_projections:
-            if self.obs_projections[name].num_of_params_to_init > 0:
-                pt_to_jax[name] = (
-                    self.obs_projections[name].load_jax_weights,
-                    name
-                )
+            pt_to_jax[f'obs_projections.' + name] = ParamNode(
+                submodule=self.obs_projections[name],
+                jax_param_names=name
+            )
             
         for name in self.pos_embeddings_names:
-            pt_to_jax[name] = (
-                    partial(self._set_terminal_param, transform_function=lambda x: x[0], strict_shapes=True),
-                    name
+            pt_to_jax[name] = ParamNode(
+                    load_func=partial(self._set_terminal_param, transform_function=lambda x: x[0]),
+                    jax_param_names=name
                 )
         return pt_to_jax
     
@@ -429,18 +424,17 @@ class OctoModulePt(nn.Module, FromJaxModel):
         self.octo_transformer = octo_transformer
         self.heads = nn.ModuleDict(heads)
         self.initialize_heads = initialize_heads
-    
-    @property      
+     
     def pt_to_jax_args_map(self):
         # {
         # pt_module_name: (load_func, jax_param_key),
         # ...
         # }
         pt_to_jax = {
-            "octo_transformer": (self.octo_transformer.load_jax_weights, 'octo_transformer'),
+            "octo_transformer": ParamNode(submodule=self.octo_transformer, jax_param_names='octo_transformer'),
         }
         if self.heads and self.initialize_heads:
-            pt_to_jax["heads"] = (self.heads['action'].load_jax_weights, 'heads_action')
+            pt_to_jax["heads.action"] = ParamNode(submodule=self.heads['action'], jax_param_names='heads_action')
             
         return pt_to_jax
         

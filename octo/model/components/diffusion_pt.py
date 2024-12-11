@@ -4,7 +4,7 @@ import logging
 import torch.nn as nn
 import torch
 
-from octo.model.components.jax_pt import FromJaxModel, LinearPt, LayerNormPt
+from octo.model.components.jax_pt import FromJaxModel, LinearPt, LayerNormPt, ParamNode
 
 default_init = nn.init.xavier_uniform
 
@@ -49,16 +49,15 @@ class ScoreActorPt(nn.Module, FromJaxModel):
         eps_pred = self.reverse_network(reverse_input)
         return eps_pred
 
-    @property
     def pt_to_jax_args_map(self):
         # {
         # pt_module_name: (load_func, jax_param_key),
         # ...
         # }
         return {
-            "time_preprocess": (self.time_preprocess.load_jax_weights, 'time_preprocess'),
-            "cond_encoder": (self.cond_encoder.load_jax_weights, 'cond_encoder'),
-            "reverse_network": (self.reverse_network.load_jax_weights, 'reverse_network')
+            "time_preprocess": ParamNode(submodule=self.time_preprocess, jax_param_names='time_preprocess'),
+            "cond_encoder": ParamNode(submodule=self.cond_encoder, jax_param_names='cond_encoder'),
+            "reverse_network": ParamNode(submodule=self.reverse_network, jax_param_names='reverse_network')
         }
 
 class FourierFeaturesPt(nn.Module, FromJaxModel):
@@ -81,14 +80,13 @@ class FourierFeaturesPt(nn.Module, FromJaxModel):
             f = x * f
         return torch.concatenate([torch.cos(f), torch.sin(f)], dim=-1)
     
-    @property
     def pt_to_jax_args_map(self):
         # {
         # pt_module_name: (load_func, jax_param_key),
         # ...
         # }
         return {
-            "w": (self._set_terminal_param, 'kernel')
+            "w": ParamNode(load_func=self._set_terminal_param, jax_param_names='kernel')
         }
 
 
@@ -115,7 +113,6 @@ class MLPPt(nn.Module, FromJaxModel):
     def forward(self, x):
         return self.layers(x)
     
-    @property
     def pt_to_jax_args_map(self):
         # {
         # pt_module_name: (load_func, jax_param_key),
@@ -125,13 +122,13 @@ class MLPPt(nn.Module, FromJaxModel):
         i = 0
         num_layer = 0
         while i < len(self.layers):
-            pt_to_jax_dict[f"layers.{i}"] = (self.layers[i].load_jax_weights, f"Dense_{num_layer}")
+            pt_to_jax_dict[f"layers.{i}"] = ParamNode(submodule=self.layers[i], jax_param_names=f"Dense_{num_layer}")
             i += 1
             if num_layer + 1 < len(self.layers) - 1 or self.activate_final:
                 if self.dropout_rate is not None and self.dropout_rate > 0:
                     i += 1
                 if self.use_layer_norm:
-                    pt_to_jax_dict[f"layers.{i}"] = (self.layers[i].load_jax_weights, f"LayerNorm_{num_layer}")
+                    pt_to_jax_dict[f"layers.{i}"] = ParamNode(submodule=self.layers[i], jax_param_names=f"LayerNorm_{num_layer}")
                     i += 1
             i += 1
             num_layer += 1
@@ -168,21 +165,20 @@ class MLPResNetBlockPt(nn.Module, FromJaxModel):
         residual = self.residual(residual)
         return residual + x
 
-    @property
     def pt_to_jax_args_map(self):
         # {
         # pt_module_name: (load_func, jax_param_key),
         # ...
         # }
         pt_to_jax_dict = {
-            "linear1": (self.linear1.load_jax_weights, "Dense_0"),
-            "linear2": (self.linear2.load_jax_weights, "Dense_1"),
+            "linear1": ParamNode(submodule=self.linear1, jax_param_names="Dense_0"),
+            "linear2": ParamNode(submodule=self.linear2, jax_param_names="Dense_1"),
         }
         if self.use_layer_norm:
-            pt_to_jax_dict["layer_norm"] = (self.layer_norm.load_jax_weights, "LayerNorm_0")
+            pt_to_jax_dict["layer_norm"] = ParamNode(submodule=self.layer_norm, jax_param_names="LayerNorm_0")
         
         if self.input_dim != self.features:
-            pt_to_jax_dict["residual"] = (self.residual.load_jax_weights, "Dense_2")
+            pt_to_jax_dict["residual"] = ParamNode(submodule=self.residual, jax_param_names="Dense_2")
         
         return pt_to_jax_dict
 
@@ -215,18 +211,17 @@ class MLPResNetPt(nn.Module, FromJaxModel):
         x = self.linear2(x) # <- default_init()
         return x
 
-    @property
     def pt_to_jax_args_map(self):
         # {
         # pt_module_name: (load_func, jax_param_key),
         # ...
         # }
         pt_to_jax_dict = {
-            "linear1": (self.linear1.load_jax_weights, "Dense_0"),
-            "linear2": (self.linear2.load_jax_weights, "Dense_1"),
+            "linear1": ParamNode(submodule=self.linear1, jax_param_names="Dense_0"),
+            "linear2": ParamNode(submodule=self.linear2, jax_param_names="Dense_1"),
         }
         for i in range(len(self.blocks)):
-            pt_to_jax_dict[f"blocks.{i}"] = (self.blocks[i].load_jax_weights, f"MLPResNetBlock_{i}")
+            pt_to_jax_dict[f"blocks.{i}"] = ParamNode(submodule=self.blocks[i], jax_param_names=f"MLPResNetBlock_{i}")
         
         return pt_to_jax_dict
 

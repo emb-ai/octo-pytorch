@@ -8,7 +8,9 @@ import torch.nn.functional as F
 from octo.model.components.base_pt import TokenGroupPt
 from octo.utils.typing import Dtype, PRNGKey, Shape, Union, Tuple
 
-from octo.model.components.jax_pt import FromJaxModel, LinearPt, LayerNormPt
+from octo.model.components.jax_pt import FromJaxModel, LinearPt, LayerNormPt, ParamNode
+
+import numpy as np
 
 class MAPHeadPt(nn.Module, FromJaxModel):
     """Multihead Attention Pooling.
@@ -44,13 +46,12 @@ class MAPHeadPt(nn.Module, FromJaxModel):
             dropout_rate=0.0  # No dropout as per original
         )
 
-    @property
     def pt_to_jax_args_map(self):
         return {
-            'attention': (self.attention.load_jax_weights, 'MultiHeadDotProductAttention_0'),
-            'layer_norm': (self.layer_norm.load_jax_weights, 'LayerNorm_0'),
-            'mlp_block': (self.mlp_block.load_jax_weights, 'MlpBlock_0'),
-            'probe': (self._set_terminal_param, 'probe')
+            'attention': ParamNode(submodule=self.attention, jax_param_names='MultiHeadDotProductAttention_0'),
+            'layer_norm': ParamNode(submodule=self.layer_norm, jax_param_names='LayerNorm_0'),
+            'mlp_block': ParamNode(submodule=self.mlp_block, jax_param_names='MlpBlock_0'),
+            'probe': ParamNode(load_func = self._set_terminal_param, jax_param_names='probe')
         }
         
     def forward(
@@ -115,14 +116,16 @@ class AddPositionEmbsPt(nn.Module, FromJaxModel):
         pos_embed = torch.randn(*emb_shape) * 0.02
         self.pos_embed = nn.Parameter(pos_embed) # trainable
     
-    @property
     def pt_to_jax_args_map(self):
         # {
-        # pt_module_name: (load_func, jax_param_key),
+        # pt_module_name: ParamNode(jax_param_names, load_func, submodule)
         # ...
         # }
         return{
-            'pos_embed': (partial(self._set_terminal_param, transform_function = lambda x: x[0]), 'pos_embedding')
+            'pos_embed': ParamNode(
+                load_func=partial(self._set_terminal_param, transform_function = lambda x: x[0]), 
+                jax_param_names='pos_embedding'
+            )
         } 
     
     def forward(self, inputs: torch.Tensor) -> torch.Tensor:
@@ -188,15 +191,14 @@ class MlpBlockPt(nn.Module, FromJaxModel):
         self.dropout1 = nn.Dropout(p=dropout_rate)
         self.dropout2 = nn.Dropout(p=dropout_rate)
 
-    @property
     def pt_to_jax_args_map(self):
         # {
-        # pt_module_name: (load_func, jax_param_key),
+        # pt_module_name: ParamNode(jax_param_names, load_func, submodule)
         # ...
         # }
         return{
-            'dense1': (self.dense1.load_jax_weights, 'Dense_0'),
-            'dense2': (self.dense2.load_jax_weights, 'Dense_1')
+            'dense1': ParamNode(submodule=self.dense1, jax_param_names='Dense_0'),
+            'dense2': ParamNode(submodule=self.dense2, jax_param_names='Dense_1')
         }    
 
     def forward(self, inputs: torch.Tensor, deterministic: bool = False) -> torch.Tensor:
@@ -209,107 +211,59 @@ class MlpBlockPt(nn.Module, FromJaxModel):
         output = self.dense2(x)
         output = self.dropout2(output) if not deterministic else output
         return output
-    
-class MultiheadAttentionPt(nn.MultiheadAttention, FromJaxModel):
-    def load_jax_weights(self, jax_params, key_jax, key_pt):
-        """
-        We use strict initialization for MultiheadAttention.
-        If at least one JAX parameter is missed, the whole MultiheadAttentionPt
-        module is assumed as uninitialized.
-        """
-        is_ok, uninitialized_params, unused_jax_params = self.check_is_main_key_in_params(jax_params, key_jax, key_pt)
-        if not is_ok:
-            return uninitialized_params, unused_jax_params
-        
-        params = jax_params[key_jax]
-        
-        uninitialized_params = []
-        unused_jax_params = list(jax_params[key_jax].keys())
-        
-        
-        
-        q_weight, _ = self._get_param(params, ('query','kernel'))
-        if q_weight is None:
-            return [key_pt], unused_jax_params
-        
-        features, num_heads, head_dim = q_weight.shape
-        embed_dim = num_heads * head_dim
-        
-        q_weight = q_weight.permute((1, 2, 0)).reshape(embed_dim, embed_dim)
-        
-        k_weight, _ = self._get_param(params, ('key', 'kernel'))
-        if k_weight is None:
-            return [key_pt], unused_jax_params
-        k_weight = k_weight.permute((1, 2, 0)).reshape(embed_dim, embed_dim)
-        
-        v_weight, _ = self._get_param(params, ('value', 'kernel'))
-        if v_weight is None:
-            return [key_pt], unused_jax_params
-        v_weight = v_weight.permute((1, 2, 0)).reshape(embed_dim, embed_dim)
-        
-        q_bias, _ = self._get_param(params, ('query', 'bias'))
-        if q_bias is None:
-            return [key_pt], unused_jax_params
-        q_bias = q_bias.reshape(embed_dim)
-        
-        k_bias, _ = self._get_param(params, ('key', 'bias'))
-        if k_bias is None:
-            return [key_pt], unused_jax_params
-        k_bias = k_bias.reshape(embed_dim)
-        
-        v_bias, _ = self._get_param(params, ('value', 'bias'))
-        if v_bias is None:
-            return [key_pt], unused_jax_params
-        v_bias = v_bias.reshape(embed_dim)
-        
-        out_proj_weight, _ = self._get_param(params, ('out', 'kernel'))
-        if out_proj_weight is None:
-            return [out_proj_weight], unused_jax_params
-        out_proj_weight = out_proj_weight.permute((2, 0, 1)).reshape(embed_dim, embed_dim)
-        
-        out_proj_bias, _ = self._get_param(params, ('out', 'bias'))
-        if out_proj_bias is None:
-            return [out_proj_bias], unused_jax_params
-               
-               
-               
-        if not self._qkv_same_embed_dim:
-            self.assign_new_value('q_proj_weight', q_weight)
-            self.assign_new_value('k_proj_weight', k_weight)
-            self.assign_new_value('v_proj_weight', v_weight)
-        else:
-            in_proj = torch.cat((q_weight, k_weight, v_weight), dim=0)
-            self.assign_new_value('in_proj_weight', in_proj)
-                
-        bias = torch.cat((q_bias, k_bias, v_bias), dim=0)
-        self.assign_new_value('in_proj_bias', bias)
-        
-        
-        self.assign_new_value('weight', out_proj_weight, self.out_proj)
-        self.assign_new_value('bias', out_proj_bias, self.out_proj)
 
-        return [], []
-        
-    @property
+def transform_qkv(qkv_jax_arrays):
+    q, k, v = qkv_jax_arrays
+    features, num_heads, head_dim = q.shape
+    embed_dim = num_heads * head_dim
+    
+    q = q.transpose((1, 2, 0)).reshape(embed_dim, embed_dim)
+    k = k.transpose((1, 2, 0)).reshape(embed_dim, embed_dim)
+    v = v.transpose((1, 2, 0)).reshape(embed_dim, embed_dim)
+    
+    return np.concatenate((q, k, v), axis=0)
+
+def transform_out(out_jax_array):
+    num_heads, head_dim, features = out_jax_array.shape
+    embed_dim = num_heads * head_dim
+    
+    out_jax_array = out_jax_array.transpose((2, 0, 1)).reshape(embed_dim, embed_dim)
+    
+    return out_jax_array
+
+def transform_bias(qkv_bias_jax_arrays):
+    q_bias, k_bias, v_bias = qkv_bias_jax_arrays
+    
+    q_bias = q_bias.reshape(-1)
+    k_bias = k_bias.reshape(-1)
+    v_bias = v_bias.reshape(-1)
+    
+    return np.concatenate((q_bias, k_bias, v_bias), axis=0)
+  
+class MultiheadAttentionPt(nn.MultiheadAttention, FromJaxModel):
+      
     def pt_to_jax_args_map(self):
-        """
-        This function is unused! We override load_jax_weights() instead!
-        """
+        # {
+        # pt_module_name: ParamNode(jax_param_names, load_func, submodule)
+        # ...
+        # }
         if not self._qkv_same_embed_dim:
-            return {
-                'q_proj_weight': (None, 'query'),
-                'k_proj_weight': (None, 'key'),
-                'v_proj_weight': (None, 'value'),
-                'in_proj_bias' : (None, 'bias'),
-                'out_proj.weight' : (None, 'out/weight'),
-                'out_proj.bias' : (None, 'out/bias'),
-            }
+            raise NotImplementedError
         else:
             return {
-                'in_proj_weight': (None, 'qkv'),
-                'in_proj_bias' : (None, 'bias'),
-                'out_proj.weight' : (None, 'out/weight'),
-                'out_proj.bias' : (None, 'out/bias'),
+                'in_proj_weight': ParamNode(
+                    load_func=partial(self._set_terminal_param, transform_function = transform_qkv),
+                    jax_param_names=['query/kernel', 'key/kernel', 'value/kernel']
+                ),
+                'in_proj_bias' : ParamNode(
+                    load_func=partial(self._set_terminal_param, transform_function = transform_bias), 
+                    jax_param_names=['query/bias', 'key/bias', 'value/bias']
+                ),
+                'out_proj.weight' : ParamNode(
+                    load_func=partial(self._set_terminal_param, transform_function = transform_out), 
+                    jax_param_names='out/kernel'
+                ),
+                'out_proj.bias' : ParamNode(load_func=self._set_terminal_param, jax_param_names='out/bias'),
                 
             }
 
@@ -355,17 +309,16 @@ class Encoder1DBlockPt(nn.Module, FromJaxModel):
             dropout_rate=dropout_rate
         )
     
-    @property
     def pt_to_jax_args_map(self):
         # {
         # pt_module_name: (load_func, jax_param_key),
         # ...
         # }
         return {
-            "layer_norm1" : (self.layer_norm1.load_jax_weights, 'LayerNorm_0'),
-            "layer_norm2" : (self.layer_norm2.load_jax_weights, 'LayerNorm_1'),
-            "self_attention" : (self.self_attention.load_jax_weights, 'MultiHeadDotProductAttention_0'),
-            "mlp_block" : (self.mlp_block.load_jax_weights, 'MlpBlock_0'),
+            "layer_norm1" : ParamNode(submodule=self.layer_norm1, jax_param_names='LayerNorm_0'),
+            "layer_norm2" : ParamNode(submodule=self.layer_norm2, jax_param_names='LayerNorm_1'),
+            "self_attention" : ParamNode(submodule=self.self_attention, jax_param_names='MultiHeadDotProductAttention_0'),
+            "mlp_block" : ParamNode(submodule=self.mlp_block, jax_param_names='MlpBlock_0'),
         }
     
     def forward(self, inputs: torch.Tensor, attention_mask: torch.Tensor, deterministic: bool = False):
@@ -468,19 +421,18 @@ class TransformerPt(nn.Module, FromJaxModel):
 
         return encoded
     
-    @property
     def pt_to_jax_args_map(self):
         # {
         # pt_module_name: (load_func, jax_param_key),
         # ...
         # }
         pt_to_jax_args = {
-            "layer_norm": (self.layer_norm.load_jax_weights, 'encoder_norm')
+            "layer_norm": ParamNode(submodule=self.layer_norm, jax_param_names='encoder_norm')
         }
         if self.add_position_embedding:
-            pt_to_jax_args['position_embedding'] = (self.position_embedding.load_jax_weights, 'position_embedding')
+            pt_to_jax_args['position_embedding'] = ParamNode(submodule=self.position_embedding, jax_param_names='position_embedding')
         for i in range(len(self.encoder_blocks)):
-            pt_to_jax_args[f'encoder_blocks.{i}'] = (self.encoder_blocks[i].load_jax_weights, f'encoderblock_{i}')
+            pt_to_jax_args[f'encoder_blocks.{i}'] = ParamNode(submodule=self.encoder_blocks[i], jax_param_names=f'encoderblock_{i}')
         
         return pt_to_jax_args
 

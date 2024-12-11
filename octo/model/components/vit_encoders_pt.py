@@ -15,7 +15,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 # from octo.model.components.film_conditioning_layer import FilmConditioning
-from octo.model.components.jax_pt import FromJaxModel, ConvPt, GroupNormPt, StdConvPt
+from octo.model.components.jax_pt import FromJaxModel, ConvPt, GroupNormPt, StdConvPt, ParamNode
 T = TypeVar("T")
 
 
@@ -67,14 +67,13 @@ class PatchEncoderPt(nn.Module, FromJaxModel):
         if use_film:
             raise NotImplementedError
     
-    @property
     def pt_to_jax_args_map(self):
         # {
         # pt_module_name: (load_func, jax_param_key),
         # ...
         # }
         return{
-            'embedding': (self.embedding.load_jax_weights, 'embedding')
+            'embedding': ParamNode(submodule=self.embedding, load_func=self.load_jax_weights, jax_param_names='embedding')
         }
 
     def forward(self, observations: torch.Tensor, train: bool = True, cond_var=None):
@@ -114,24 +113,23 @@ class SmallStemPt(nn.Module, FromJaxModel):
                 GroupNormPt(32, feature),
                 nn.ReLU()
             ))
-        self.embedding2 = ConvPt(features[-1], num_features, kernel_size=patch_size // 16, stride=patch_size // 16)
         self.embedding = ConvPt(features[-1], num_features, kernel_size=patch_size // 16, stride=patch_size // 16)
         if use_film:
             raise NotImplementedError
             # self.film = FilmConditioning()
             
-    @property
     def pt_to_jax_args_map(self):
         # {
         # pt_module_name: (load_func, jax_param_key),
         # ...
         # }
         pt_to_jax_args = {
-            'embedding': (self.embedding.load_jax_weights, 'embedding'),
+            # 'embedding': (self.embedding.load_jax_weights, 'embedding'),
+            'embedding': ParamNode(submodule=self.embedding, load_func=None, jax_param_names='embedding')
         }
         for i in range(len(self.layers)):
-            pt_to_jax_args[f'layers.{i}.0'] = (self.layers[i][0].load_jax_weights, f'StdConv_{i}')
-            pt_to_jax_args[f'layers.{i}.1'] = (self.layers[i][1].load_jax_weights, f'GroupNorm_{i}')
+            pt_to_jax_args[f'layers.{i}.0'] = ParamNode(submodule=self.layers[i][0], load_func=None, jax_param_names=f'StdConv_{i}')
+            pt_to_jax_args[f'layers.{i}.1'] = ParamNode(submodule=self.layers[i][1], load_func=None, jax_param_names=f'GroupNorm_{i}')
         return pt_to_jax_args
             
     def forward(self, observations: torch.Tensor, train: bool = True, cond_var=None):

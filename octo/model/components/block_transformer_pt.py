@@ -13,7 +13,7 @@ import numpy as np
 
 from octo.model.components.base_pt import TokenGroupPt
 from octo.model.components.transformer_pt import TransformerPt
-from octo.model.components.jax_pt import FromJaxModel
+from octo.model.components.jax_pt import FromJaxModel, ParamNode
 
 from .block_transformer import AttentionRule
 
@@ -119,10 +119,9 @@ class BlockTransformerPt(nn.Module, FromJaxModel):
         self.transformer = TransformerPt(**self.transformer_kwargs)
         self.attention_mask = None
 
-    @property
     def pt_to_jax_args_map(self):
         return {
-            "transformer": (self.transformer.load_jax_weights, 'Transformer_0')
+            "transformer": ParamNode(submodule=self.transformer, jax_param_names='Transformer_0')
         }
     
     def forward(
