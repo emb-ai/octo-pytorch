@@ -137,6 +137,8 @@ class OctoModelPt(nn.Module):
         cls,
         checkpoint_path: str,
         step: Optional[int] = None,
+        skip_keys: list = [], 
+        skip_keys_regex: str = None
     ) -> "OctoModelPt":
         """Loads a model from a checkpoint that was saved via `save_pretrained`.
 
@@ -216,24 +218,17 @@ class OctoModelPt(nn.Module):
             example_batch = example_batch,
             dataset_statistics = dataset_statistics
         )
-        uninitialized_params, unused_jax_params = octo_model.module.load_jax_weights(params)
-
-        if len(uninitialized_params) == 0:
-            logging.warning(f'All parameters were initialized from {checkpoint_path}!')
-        else:
-            logging.warning(f'Following parameters were not initialized from {checkpoint_path}: {uninitialized_params}')
-        
-        if len(unused_jax_params) == 0:
-            logging.warning(f'Nothing was skipped in {checkpoint_path}!')
-        else:
-            logging.warning(f'Following parameters in {checkpoint_path} were skipped in initialization: {unused_jax_params}')
-            
+        missing_keys, skipped_keys, unexpected_keys = octo_model.module.load_jax_weights(
+            params,
+            skip_keys, 
+            skip_keys_regex
+        )
         
         return {
                 'octo_model': octo_model,
                 'params': params,
-                'uninitialized_params': uninitialized_params,
-                'unused_jax_params': unused_jax_params 
+                'missing_keys': missing_keys,
+                'skipped_keys': skipped_keys 
         }
 
     @staticmethod
@@ -293,7 +288,7 @@ class OctoModelPt(nn.Module):
             }
         
     
-    def load_weights_from_jax(self, checkpoint_path, step: Optional[int] = None,):
+    def load_weights_from_jax(self, checkpoint_path, step: Optional[int] = None, skip_keys: list = [], skip_keys_regex: str = None):
         if checkpoint_path.startswith("hf://"):
             if step:
                 raise ValueError(
@@ -369,19 +364,14 @@ class OctoModelPt(nn.Module):
         step = step if step is not None else checkpointer.latest_step()
         params = checkpointer.restore(step, params_shape)
 
-        uninitialized_params, unused_jax_params = self.module.load_jax_weights(params)
+        missing_keys, skipped_keys, unexpected_keys = self.module.load_jax_weights(
+            params,
+            skip_keys, 
+            skip_keys_regex
+        )
         
-        if len(uninitialized_params) == 0:
-            logging.warning(f'All parameters were initialized from {checkpoint_path}!')
-        else:
-            logging.warning(f'Following parameters were not initialized from {checkpoint_path}: {uninitialized_params}')
         
-        if len(unused_jax_params) == 0:
-            logging.warning(f'Nothing was skipped in {checkpoint_path}!')
-        else:
-            logging.warning(f'Following parameters in {checkpoint_path} were skipped in initialization: {unused_jax_params}')
-            
-        return uninitialized_params, unused_jax_params
+        return missing_keys, skipped_keys
     
     
     def forward(
