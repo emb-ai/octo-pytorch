@@ -197,8 +197,9 @@ class OctoTransformerPt(nn.Module, FromJaxModel):
             pe = pe[(slice(None),) * history_dim + (slice(0, history_len),)]
         else:
             assert pe.shape == inputs[0].shape
-            
-        return inputs + pe.unsqueeze(0).expand(bs, *pe.shape)
+        pe = pe.unsqueeze(0).expand(bs, *pe.shape)
+        assert inputs.shape == pe.shape
+        return inputs + pe
             
     def forward(self,
         observations,
