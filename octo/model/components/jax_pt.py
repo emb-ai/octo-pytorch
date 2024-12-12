@@ -227,8 +227,9 @@ class FromJaxModel(ABC):
             if old_values.dim() != weight.dim():
                 raise AssertionError(f"Shapes of '{pt_param_name}' and {weight.shape} are incompatible: {old_values.dim()} and {weight.dim()} has different number if dimensions")
 
-            weight = self._copy_weights_with_diff_shapes(weight, old_values.clone())
-            logging.info(f"Copying weights: {jax_param_names} (shape: {weight.shape}) -> {pt_param_name} (shape: {old_values.shape})")
+            if old_values.shape != weight.shape:
+                logging.info(f"Copying weights: {jax_param_names} (shape: {weight.shape}) -> {pt_param_name} (shape: {old_values.shape})")
+                weight = self._copy_weights_with_diff_shapes(weight, old_values.clone())
             
         elif copying_rule == WeightsCopyingRule.SKIP:
             weight = old_values

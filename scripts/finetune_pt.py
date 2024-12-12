@@ -215,7 +215,10 @@ def main(_):
     )
     _, _ = model.load_weights_from_jax(FLAGS.config.pretrained_path,
         step=FLAGS.config.pretrained_step,
-        skip_keys_regex=".*hf_model"
+        skip_keys=FLAGS.config.to_dict().get('skip_keys', []),
+        skip_keys_regex= FLAGS.config.to_dict().get('skip_keys_regex', '.*hf_model'),
+        non_strict_keys=FLAGS.config.to_dict().get('non_strict_keys', []),
+        non_strict_keys_regex=FLAGS.config.to_dict().get('non_strict_keys_regex', None),
     )
     
     model = model.to(device_id)
