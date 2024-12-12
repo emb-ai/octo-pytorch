@@ -138,7 +138,9 @@ class OctoModelPt(nn.Module):
         checkpoint_path: str,
         step: Optional[int] = None,
         skip_keys: list = [], 
-        skip_keys_regex: str = None
+        skip_keys_regex: str = None,
+        non_strict_keys: list = [],
+        non_strict_keys_regex: str = None
     ) -> "OctoModelPt":
         """Loads a model from a checkpoint that was saved via `save_pretrained`.
 
@@ -218,10 +220,14 @@ class OctoModelPt(nn.Module):
             example_batch = example_batch,
             dataset_statistics = dataset_statistics
         )
+        
+        del params['octo_transformer']['task_tokenizers_language'] # we download weights directly from HF
         missing_keys, skipped_keys, unexpected_keys = octo_model.module.load_jax_weights(
             params,
             skip_keys, 
-            skip_keys_regex
+            skip_keys_regex,
+            non_strict_keys, 
+            non_strict_keys_regex
         )
         
         return {
@@ -288,7 +294,15 @@ class OctoModelPt(nn.Module):
             }
         
     
-    def load_weights_from_jax(self, checkpoint_path, step: Optional[int] = None, skip_keys: list = [], skip_keys_regex: str = None):
+    def load_weights_from_jax(
+        self,
+        checkpoint_path,
+        step: Optional[int] = None,
+        skip_keys: list = [],
+        skip_keys_regex: str = None,
+        non_strict_keys: list = [],
+        non_strict_keys_regex: str = None
+    ):
         if checkpoint_path.startswith("hf://"):
             if step:
                 raise ValueError(
@@ -364,10 +378,13 @@ class OctoModelPt(nn.Module):
         step = step if step is not None else checkpointer.latest_step()
         params = checkpointer.restore(step, params_shape)
 
+        del params['octo_transformer']['task_tokenizers_language'] # we download weights directly from HF
         missing_keys, skipped_keys, unexpected_keys = self.module.load_jax_weights(
             params,
             skip_keys, 
-            skip_keys_regex
+            skip_keys_regex,
+            non_strict_keys,
+            non_strict_keys_regex
         )
         
         

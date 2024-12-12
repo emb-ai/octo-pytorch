@@ -61,21 +61,6 @@ class TorchRLDSDataset(torch.utils.data.IterableDataset):
             sample = _np2pt(sample)
             yield sample
 
-    def __len__(self):
-        lengths = np.array(
-            [
-                stats["num_transitions"]
-                for stats in self._rlds_dataset.dataset_statistics
-            ]
-        )
-        if hasattr(self._rlds_dataset, "sample_weights"):
-            lengths *= np.array(self._rlds_dataset.sample_weights)
-        total_len = lengths.sum()
-        if self._is_train:
-            return int(0.95 * total_len)
-        else:
-            return int(0.05 * total_len)
-
 def _to_device(data, device):
     if isinstance(data, dict):
         return {key: _to_device(val, device) for key, val in data.items()}
@@ -104,7 +89,7 @@ def main(_):
 
     # load pre-trained model
     logging.info("Loading pre-trained model...")
-    # meta = OctoModelPt.load_pretrained_from_jax(FLAGS.pretrained_path)
+
     meta = OctoModelPt.load_config_and_meta_from_jax(FLAGS.pretrained_path)
     
     text_processor = meta['text_processor']
@@ -135,13 +120,6 @@ def main(_):
     
     dataset = dataset.repeat().unbatch()
     
-    def process_batch(batch):
-        batch = process_text(batch, text_processor)
-        del batch["dataset_name"]
-        return batch
-
-    # dataset = map(process_batch, dataset)
-    
     pytorch_dataset = TorchRLDSDataset(dataset, text_processor)
     dataloader = DataLoader(
         pytorch_dataset,
@@ -167,7 +145,6 @@ def main(_):
     )
     meta["config"]["model"]["num_tokens_dict"] = {
         'primary': 256,
-        'wrist': 64,
         'language': 16,
         'proprio': 14,
         'action': 1
@@ -190,14 +167,12 @@ def main(_):
         **meta,
         verbose=True,
     )
-    model.load_weights_from_jax(FLAGS.pretrained_path)
+    model.load_weights_from_jax(FLAGS.pretrained_path, skip_keys_regex=".*hf_model")
     model.to(device)
 
     # create optimizer & train_state, optionally freeze keys for pre-trained transformer
     # train_state bundles parameters & optimizers
-    # learning_rate = optax.join_schedules(
-    #     [optax.linear_schedule(0, 3e-5, 100), optax.constant_schedule(3e-5)], [100]
-    # )
+   
     frozen_keys = model.config["optimizer"]["frozen_keys"]
     if FLAGS.freeze_transformer:
         frozen_keys.append("BlockTransformer_0")
@@ -213,15 +188,14 @@ def main(_):
     scheduler = SequentialLR(optimizer, schedulers=[linear_part, constant_part], milestones=[100])
 
     example_batch["task"]["pad_mask_dict"]['language_instruction'] = example_batch["task"]["pad_mask_dict"]['language_instruction'][:, 0]
+    
     # run finetuning loop
-    # iter_loader = iter(dataloader)
     logging.info("Starting finetuning...")
-    # for i in tqdm.tqdm(range(5000), total=5000, dynamic_ncols=True):
-    #     batch = next(dataloader)
+   
     for i, batch in tqdm.tqdm(enumerate(dataloader), total=5000, dynamic_ncols=True):
         if i == 5000:
             break
-        # batch = next(dataloader)
+       
         batch["task"]["pad_mask_dict"]['language_instruction'] = batch["task"]["pad_mask_dict"]['language_instruction'][:, 0]
         batch = _to_device(batch, device=device)
         optimizer.zero_grad()

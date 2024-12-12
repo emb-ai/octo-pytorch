@@ -130,7 +130,7 @@ def regex_filter(regex_keys, xs):
 
 
 def tree_map(fn: Callable, tree: dict, is_leaf: Callable[[Any], bool] | None = None, **kwargs) -> dict:
-    tree_flat = _flatten_dict(tree)
+    tree_flat = _flatten_dict(tree, sep=None)
     if is_leaf is None:
         is_leaf = lambda x: True
     mapped_tree = {}

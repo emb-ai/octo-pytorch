@@ -91,6 +91,12 @@ def main(_):
     num_devices = distributed_state.num_processes
     
     if distributed_state.is_main_process:
+        logging.set_verbosity(logging.INFO)
+    else:
+        logging.set_verbosity(logging.ERROR)
+    
+    
+    if distributed_state.is_main_process:
         logging.info(
             f"""
             Octo Finetuning Script
@@ -208,7 +214,8 @@ def main(_):
         **meta
     )
     _, _ = model.load_weights_from_jax(FLAGS.config.pretrained_path,
-        step=FLAGS.config.pretrained_step
+        step=FLAGS.config.pretrained_step,
+        skip_keys_regex=".*hf_model"
     )
     
     model = model.to(device_id)

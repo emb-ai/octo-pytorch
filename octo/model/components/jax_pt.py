@@ -89,9 +89,19 @@ class FromJaxModel(ABC):
     def get_load_func_dict(self):
         return _flatten_dict(self.get_leaf_properties('load_func'))
     
-    def load_jax_weights(self, jax_params_dict: dict, skip_keys: list = [], skip_keys_regex: str = None):
+    def load_jax_weights(
+        self,
+        jax_params_dict: dict,
+        skip_keys: list = [],
+        skip_keys_regex: str = None,
+        non_strict_keys: list = [],
+        non_strict_keys_regex: str = None
+    ):
         if len(skip_keys) > 0 and skip_keys_regex is not None:
             logging.warning("skip_keys and skip_keys_regex are both provided. Next use only skip_keys")
+        
+        if len(non_strict_keys) > 0 and non_strict_keys_regex is not None:
+            logging.warning("non_strict_keys and non_strict_keys_regex are both provided. Next use only non_strict_keys")
         
         state_dict = self.state_dict()
         
@@ -101,6 +111,14 @@ class FromJaxModel(ABC):
              
         if len(skip_keys) > 0:
             logging.info(f"Following keys will be SKIPPED during initialization: {skip_keys}")
+            
+        if len(non_strict_keys) == 0 and non_strict_keys_regex is not None:
+            r = re.compile(non_strict_keys_regex)
+            non_strict_keys = list(filter(r.match, state_dict))
+             
+        if len(non_strict_keys) > 0:
+            logging.info(f"Following keys will be initialized, even if shapes are differ: {non_strict_keys}")
+        
         
         pt_to_jax_dict = self.get_params_names_dict()
         jax_keys_to_skip = [pt_to_jax_dict[key] for key in pt_to_jax_dict if key in skip_keys]
@@ -110,12 +128,17 @@ class FromJaxModel(ABC):
         copying_rules = self.get_copying_rule_dict()
         copying_functions = self.get_load_func_dict()
         
+        for key in non_strict_keys:
+            copying_rules[key] = WeightsCopyingRule.USE_TARGET_SHAPE
+        
         jax_params_dict_flat = _flatten_dict(jax_params_dict, sep='/')
         jax_params_dict_flat = dict(filter(lambda x: not x[0] in jax_keys_to_skip, jax_params_dict_flat.items()))
         
         new_state_dict = {}
         
         for pt_key, jax_keys in pt_to_jax_dict.items():
+            if not self.check_keys(jax_keys, jax_params_dict_flat):
+                continue
             new_state_dict.update(
                 copying_functions[pt_key](
                     pt_key,
@@ -146,7 +169,7 @@ class FromJaxModel(ABC):
             logging.warning(f"Following parameters were not initialized ({len(missing_keys)} total): {missing_keys}")
             
         if len(skipped_keys) > 0:
-            logging.warning(f"Following JAX parameters were skipped during initialized ({len(skipped_keys)} total): {skipped_keys}")
+            logging.warning(f"Following JAX parameters were skipped during initialization ({len(skipped_keys)} total): {skipped_keys}")
         
         if len(unexpected_keys) > 0:
             logging.warning(f"Following Pt parameters were unexpected during loading ({len(unexpected_keys)} total): {unexpected_keys}")
@@ -159,6 +182,17 @@ class FromJaxModel(ABC):
             # pt_module_name: ParamNode(jax_param_names, load_func, submodule)
             # ...
         } 
+        
+    def check_keys(self, keys: Union[str, List[str]], d: dict):
+        if isinstance(keys, list):
+            for k in keys:
+                if not k in d:
+                    return False
+            return True
+        elif isinstance(keys, str):
+            return keys in d
+        else:
+            raise ValueError
     
     def _set_terminal_param(
         self, 
