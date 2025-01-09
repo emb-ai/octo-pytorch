@@ -101,7 +101,7 @@ def main(_):
             Task Modality: {FLAGS.config.modality}
             Finetuning Mode: {FLAGS.config.finetuning_mode}
 
-            # Devices: {jax.device_count()}
+            # Devices: {num_devices}
             Batch size: {FLAGS.config.batch_size} ({FLAGS.config.batch_size // num_devices } per device)
             # Steps: {FLAGS.config.num_steps}
         """
