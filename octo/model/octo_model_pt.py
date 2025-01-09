@@ -681,8 +681,8 @@ def _verify_shapes(
     silent: bool = False,
 ):
     weak_fail, fail = False, False
-    data_flat = _flatten_dict(data)
-    example_data_flat = _flatten_dict(example_data)
+    data_flat = _flatten_dict(data, sep=None)
+    example_data_flat = _flatten_dict(example_data, sep=None)
 
     # Check that all elements are present
     if set(data_flat.keys()) != set(example_data_flat.keys()):
