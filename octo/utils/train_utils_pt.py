@@ -46,15 +46,15 @@ def freeze_weights_pt(
     logging.info(f"Num frozen params: {total_params - trainable_params:,}.")
     logging.info("To see a detailed list of frozen params, set logging level to DEBUG.")
 
-def _flatten_dict(d, parent_key: str = '', sep: str ='.'):
+def _flatten_dict(d,  sep: str ='.', parent_key: str = ''):
     items = {}
     for k, v in d.items():
         if sep is None:
             new_key = (*parent_key, k) if parent_key else (k,)
         else:
             new_key = parent_key + sep + k if parent_key else k
-        if isinstance(v, dict):
-            items.update(_flatten_dict(v, new_key, sep=sep).items())
+        if isinstance(v, dict) and len(v) > 0:
+            items.update(_flatten_dict(v, parent_key=new_key, sep=sep).items())
         else:
             items[new_key] = v
     return items
