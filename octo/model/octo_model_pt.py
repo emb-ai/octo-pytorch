@@ -31,17 +31,66 @@ from octo.utils.train_utils_pt import _flatten_dict, _jax_config_to_pt_config, _
 
 
 class OctoModelPt(nn.Module):
-    """Recommended way of interacting with Octo models.
+    """Recommended way of interacting with OctoPt models.
+    
+    Usage for loading PyTorch weights:
 
-    TODO
+        >>> model = OctoModelPt.load_pretrained(checkpoint_dir)['octo_model']
+    
+    Or you can directly load model from JAX checkpoint:
+    
+        >>> model = OctoModelPt.load_pretrained_from_jax(jax_checkpoint_dir)['octo_model']
+        >>> # or from original HF:
+        >>> model = OctoModelPt.load_pretrained_from_jax("hf://rail-berkeley/octo-small-1.5")['octo_model']
+        
+    Additionally, you can restore optimizer state from PyTorch checkpoint as well:
+
+        >>> load_dict = OctoModelPt.load_pretrained(checkpoint_dir, load_optimizer_state=True)
+        >>> model = load_dict['octo_model']
+        >>> optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
+        >>> optimizer.load_state_dict(load_dict['optimizer_state_dict'])
+
+    
+    Usage for inference:
+
+        >>> model = OctoModelPt.load_pretrained(checkpoint_dir)['octo_model']
+        >>> tasks = model.create_tasks(texts=["go to the red room"], device = ...)
+        >>> # or tasks = model.create_tasks(goals={"image_primary": goal_images}, device = ...)
+        >>> actions = model.sample_actions(observations, tasks, generator=torch.Generator(device).manual_seed(0))
+        >>> # Note: these are normalized actions (processed to mean 0 and std 1). To get correct actions
+        >>> # for a particular embodiment, you must additionally specify unnormalization statistics.
+        >>> # For example, to get actions for one of Octo's pretraining datasets:
+        >>> actions = model.sample_actions(observations, tasks, generator=torch.Generator(device).manual_seed(0),
+        >>>     unnormalization_statistics=model.dataset_statistics["DATASET_NAME_HERE"]["action"]
+        >>> )
+
 
     Usage for finetuning:
 
-       TODO
+        >>> model = OctoModelPt.load_pretrained_from_jax(jax_checkpoint_dir)['octo_model']
+        >>> optimizer.zero_grad()
+        >>> _, head_outputs = model(
+                observations=batch['observation'], 
+                tasks=batch['task'], 
+                timestep_pad_mask=batch["observation"]['timestep_pad_mask'], 
+                action_pad_mask=batch['action_pad_mask'],
+                gt_actions=batch['action'],
+                train=True, 
+                save_attention_mask=True)
+        >>> loss = head_outputs['action'][0]
+        >>> loss.backward()
+        >>> optimizer.step() 
+        >>> # when it's time to save (also save optimizer state)
+        >>> model.save_pretrained(step=i, checkpoint_path=save_dir, optimizer=optimizer)
 
     Usage for pretraining:
 
-       TODO
+        >>> model = OctoModelPt.from_config(
+                config,
+                example_batch,
+                text_processor
+            )  # initializes params
+        >>> # Continue as in finetuning example
 
     See full usage examples in train.py and finetune.py.
 
@@ -516,7 +565,7 @@ class OctoModelPt(nn.Module):
         cls,
         checkpoint_path: str,
         step: int = None,
-        optimizer: torch.optim.Optimizer = None,
+        load_optimizer_state: bool = False,
     ) -> "OctoModelPt":
         """Loads a model from a checkpoint that was saved via `save_pretrained`.
 
@@ -566,9 +615,9 @@ class OctoModelPt(nn.Module):
         octo_model.load_state_dict(checkpoint['state_dict'])
         ret = {}
         ret['octo_model'] = octo_model
-        if optimizer is not None:
-            optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-            ret['optimizer_state_dict'] = optimizer
+        if load_optimizer_state:
+            assert 'optimizer_state_dict' in checkpoint, "No optimizer state in checkpoint"
+            ret['optimizer_state_dict'] = checkpoint['optimizer_state_dict']
         return ret
 
     def save_pretrained(

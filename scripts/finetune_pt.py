@@ -14,9 +14,6 @@ from accelerate import PartialState
 
 from absl import app, flags, logging
 import flax
-from flax.traverse_util import flatten_dict
-import jax
-from jax.sharding import Mesh, NamedSharding, PartitionSpec
 from ml_collections import config_flags, ConfigDict
 import optax
 import tensorflow as tf
@@ -328,7 +325,7 @@ def main(_):
                 verbose=False,
                 save_attention_mask=True)
         
-        loss = head_outputs['action'][1]['loss']
+        loss = head_outputs['action'][0]
         
         loss.backward()
         
