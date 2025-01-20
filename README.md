@@ -1,6 +1,8 @@
 # Octo-PyTorch
 
-This repo contains code for training and finetuning [Octo](https://octo-models.github.io/) generalist robotic policies (GRPs) using PyTorch framework.
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://githubtocolab.com/emb-ai/octo-pytorch/blob/main/examples/01_pt_inference_pretrained.ipynb)
+
+This repo contains code for training and finetuning [Octo](https://octo-models.github.io/) (Team, Octo Model, et al. "Octo: An open-source generalist robot policy.") generalist robotic policies (GRPs) using PyTorch framework.
 Base architecture and fine-tuning procedure were reimplemented from original repo, which can be useful for further research related to robotic manipulation.
 
 ## Get Started
@@ -47,8 +49,8 @@ python scripts/finetune_pt.py --config.pretrained_path=hf://rail-berkeley/octo-s
 
 ## Checkpoints
 
-You can find pretrained Octo checkpoints [here](https://huggingface.co/rail-berkeley).
-At the moment we provide the following model versions:
+You can find original pretrained Octo checkpoints [here](https://huggingface.co/rail-berkeley).
+At the moment authors provide the following model versions:
 
 | Model                                                         | Inference on 1x NVIDIA 4090 | Size       |
 |---------------------------------------------------------------|-----------------------------|------------|
@@ -63,30 +65,13 @@ as well as how to use our data loader independently. We provide the following ex
 
 |                                                                      |                                                                                                                    |
 |----------------------------------------------------------------------|--------------------------------------------------------------------------------------------------------------------|
-| [Octo Inference](examples/01_inference_pretrained.ipynb)             | Minimal example for loading and running a pretrained Octo model                                                    |
-| [Octo Finetuning](examples/02_finetune_new_observation_action.py)    | Minimal example for finetuning a pretrained Octo models on a small dataset with a new observation and action space |
-| [Octo Rollout](examples/03_eval_finetuned.py)                        | Run a rollout of a pretrained Octo policy in a Gym environment                                                     |
-| [Octo Robot Eval](examples/04_eval_finetuned_on_robot.py)            | Evaluate a pretrained Octo model on a real WidowX robot                                                            |
-| [OpenX Dataloader Intro](examples/05_dataloading.ipynb)              | Walkthrough of the features of our Open X-Embodiment data loader                                                   |
-| [OpenX PyTorch Dataloader](examples/06_pytorch_oxe_dataloader.ipynb) | Standalone Open X-Embodiment data loader in PyTorch                                                                |
+| [OctoPt Inference](examples/01_pt_inference_pretrained.ipynb)             | Minimal example for loading and running a pretrained Octo model                                                    |
+| [OctoPt Finetuning](examples/02_pt_finetune_new_observation_action.py)    | Minimal example for finetuning a pretrained Octo models on a small dataset with a new observation and action space |
+| [OctoPt Rollout](examples/03_pt_eval_finetuned.py)                        | Run a rollout of a pretrained Octo policy in a Gym environment                                                     |
+| 
 
 
-## Octo Pretraining
-
-To reproduce our Octo pretraining on 800k robot trajectories, run:
-```bash
-python scripts/train.py --config scripts/configs/octo_pretrain_config.py:<size> --name=octo --config.dataset_kwargs.oxe_kwargs.data_dir=... --config.dataset_kwargs.oxe_kwargs.data_mix=oxe_magic_soup ...
-```
-
-To download the pretraining dataset from the [Open X-Embodiment Dataset](https://robotics-transformer-x.github.io/),
-install the [rlds_dataset_mod package](https://github.com/kpertsch/rlds_dataset_mod)
-and run the [prepare_open_x.sh script](https://github.com/kpertsch/rlds_dataset_mod/blob/main/prepare_open_x.sh).
-The total size of the pre-processed dataset is ~1.2TB.
-
-We run pretraining using a TPUv4-128 pod in 8 hours for the Octo-S model and in 14 hours for Octo-B.
-
-
-## Octo Finetuning
+## OctoPt Finetuning
 
 We provide a [minimal example](examples/02_pt_finetune_new_observation_action.py) for finetuning with a new observation and action space.
 
