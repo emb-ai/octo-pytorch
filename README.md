@@ -1,6 +1,6 @@
 # Octo-PyTorch
 
-[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://githubtocolab.com/emb-ai/octo-pytorch/blob/main/examples/01_pt_inference_pretrained.ipynb)
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://githubtocolab.com/emb-ai/octo-pytorch/blob/pytorch/examples/01_pt_inference_pretrained.ipynb)
 
 This repo contains code for training and finetuning [Octo](https://octo-models.github.io/) (Team, Octo Model, et al. "Octo: An open-source generalist robot policy.") generalist robotic policies (GRPs) using PyTorch framework.
 Base architecture and fine-tuning procedure were reimplemented from original repo, which can be useful for further research related to robotic manipulation.
