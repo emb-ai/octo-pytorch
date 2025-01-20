@@ -275,38 +275,6 @@ def main(_):
             dict(example_batch_spec=example_batch_spec), allow_val_change=True
         )
 
-    #########
-    #
-    # Define loss, train_step, and eval_step
-    #
-    #########
-
-    # Data parallelism
-    # Model is replicated across devices, data is split across devices
-    
-    #########
-    #
-    # Build validation & visualization callbacks
-    #
-    #########
-
-    # TODO
-
-
-    #########
-    #
-    # Optionally build visualizers for sim env evals
-    #
-    #########
-
-    # TODO
-
-    #########
-    #
-    # Train loop
-    #
-    #########
-
 
     for i, batch in tqdm.tqdm(enumerate(dataloader), total=int(FLAGS.config.num_steps), dynamic_ncols=True):
         

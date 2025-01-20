@@ -50,8 +50,8 @@ def continuous_loss(
     mse = torch.square(pred_value - ground_truth_value)
     mse = masked_mean(mse, mask)
     return loss, {
-        "loss": loss,
-        "mse": mse,
+        "loss": loss.item(),
+        "mse": mse.item(),
     }
 
 
@@ -188,7 +188,7 @@ class ContinuousActionHeadPt(nn.Module, ActionHead, FromJaxModel):
         # # Sum over action dimension instead of averaging
         loss = loss * self.action_dim
         metrics["loss"] = metrics["loss"] * self.action_dim
-        metrics["mse"] = metrics["mse"].detach() * self.action_dim
+        metrics["mse"] = metrics["mse"] * self.action_dim
         return loss, metrics
 
     def predict_action(
