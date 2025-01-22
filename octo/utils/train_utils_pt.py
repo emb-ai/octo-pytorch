@@ -103,6 +103,10 @@ def _jax_config_to_pt_config(config):
 
 
 def _np2pt(data, device=None, dtype=None):
+    """Transform dictionary with numpy arrays to torch tensors.
+    Trnsform images to channel-first format: NHWC -> NCHW, NTHWC -> NTCHW
+
+    """
     if isinstance(data, dict):
         return {key: _np2pt(val, device) for key, val in data.items()}
     elif isinstance(data, np.ndarray):

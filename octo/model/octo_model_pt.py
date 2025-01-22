@@ -190,12 +190,21 @@ class OctoModelPt(nn.Module):
         skip_keys_regex: str = None,
         non_strict_keys: list = [],
         non_strict_keys_regex: str = None
-    ) -> "OctoModelPt":
-        """Loads a model from a checkpoint that was saved via `save_pretrained`.
+    ) -> "Dict":
+        """Instantiate OctoModelPt model from a JAX checkpoint.
 
         Args:
             checkpoint_path (str): A path to either a directory of checkpoints or a single checkpoint.
             step (int, optional): If multiple checkpoints are present, which one to load. Defaults to the latest.
+            skip_keys (list, optional): List if parameters of torch.nn.Module to be skipped during initialization.
+            skip_keys_regex (str, optional): Regular expression to filter torch.nn.Module parameters to be skipped.
+            non_strict_keys (list, optional): List of parameters that may differ in shape from those loaded from JAX.
+                It copies values only in matching dimensions.
+            non_strict_keys_regex (str, optional): Regular expression to filter parameters for non-strict initalization.
+        
+        Returns:
+            dict: Dictionary with OctoModelPt, JAX params, lists of missing and skipped keys.
+                        
         """
         if checkpoint_path.startswith("hf://"):
             if step:
@@ -287,7 +296,20 @@ class OctoModelPt(nn.Module):
         }
 
     @staticmethod
-    def load_config_and_meta_from_jax(checkpoint_path, return_jax_meta=False, step: Optional[int] = None):
+    def load_config_and_meta_from_jax(
+        checkpoint_path: str, 
+        return_jax_meta: bool = False
+    )-> "Dict":
+        """Load meta information from JAX checkpoint.
+
+        Args:
+            checkpoint_path (str): A path to either a directory of checkpoints or a single checkpoint.
+            return_jax_meta (bool, optional): Whether return JAX-style arrays or torch tensors.
+            
+        Returns:
+            dict: Dictionary with model configuration, example batch, dataset statistics and text processor.
+                        
+        """
         if checkpoint_path.startswith("hf://"):
             checkpoint_path = _download_from_huggingface(
                 checkpoint_path.removeprefix("hf://")
@@ -352,6 +374,18 @@ class OctoModelPt(nn.Module):
         non_strict_keys: list = [],
         non_strict_keys_regex: str = None
     ):
+        """Initalize weights of existing instance of OctoModelPt model from a JAX checkpoint.
+
+        Args:
+            checkpoint_path (str): A path to either a directory of checkpoints or a single checkpoint.
+            step (int, optional): If multiple checkpoints are present, which one to load. Defaults to the latest.
+            skip_keys (list, optional): List if parameters of torch.nn.Module to be skipped during initialization.
+            skip_keys_regex (str, optional): Regular expression to filter torch.nn.Module parameters to be skipped.
+            non_strict_keys (list, optional): List of parameters that may differ in shape from those loaded from JAX.
+                It copies values only in matching dimensions.
+            non_strict_keys_regex (str, optional): Regular expression to filter parameters for non-strict initalization.
+        
+        """
         if checkpoint_path.startswith("hf://"):
             if step:
                 raise ValueError(
@@ -458,7 +492,8 @@ class OctoModelPt(nn.Module):
             tasks: dict of tasks of shape (batch_size, *shape)
                 Shape must be consistent with self.example_batch["task"]
             timestep_pad_mask: (batch_size, window_size) Boolean mask that is False when the timestep corresponds to padding
-            train: whether to run in train mode
+            train: whether to run in train mode,
+            transformer_only: If True, action heads are not used furing forward.
         """
         _verify_shapes(
             observations,
@@ -499,9 +534,16 @@ class OctoModelPt(nn.Module):
         """Samples actions from the model. See `action_heads.py` for more info.
 
         Args:
-            TODO
+            observations: dictionary of arrays of shape (batch_size, window_size, *)
+            tasks: dict of tasks of shape (batch_size, *)
+            unnormalization_statistics: dict of statistics for unnormalizing actions (must contain "mean",
+                "std", and optionally "mask")
+            normalization_type: type of normalization applied to the actions
+            timestep_pad_mask: (batch_size, window_size) Boolean mask that is False when the timestep corresponds to padding
+            train: whether to run in train mode
+            ...see `action_heads.py` for the rest of the kwargs.
         Returns:
-            TODO
+            actions: (*sample_shape, batch_size, action_horizon, action_dim)
         """
         if timestep_pad_mask is None:
             timestep_pad_mask = observations["timestep_pad_mask"]
@@ -572,6 +614,7 @@ class OctoModelPt(nn.Module):
         Args:
             checkpoint_path (str): A path to either a directory of checkpoints or a single checkpoint.
             step (int, optional): If multiple checkpoints are present, which one to load. Defaults to the latest.
+            load_optimizer_state (bool, optional): Whether to load optimizer state from checkpoint. Defaults to False.
         """
         checkpoint_path = Path(checkpoint_path)
         with open(checkpoint_path / "config.json", 'r') as f:
@@ -680,7 +723,6 @@ class OctoModelPt(nn.Module):
             example_batch (Dict[str, Any]): Example batch.
             text_processor (Any, optional): Preprocessor for text inputs.
             verbose (bool, optional): Whether to print out a summary of the model.
-            rng (Optional[PRNGKey], optional): RNG key for initializing the model.
             dataset_statistics (Optional[Dict[str, Any]], optional): Dataset statistics.
         """
         module = OctoModulePt.create(**config["model"])
@@ -696,8 +738,7 @@ class OctoModelPt(nn.Module):
 
     def get_pretty_spec(self):
         """Brief summary of the model's expected inputs and outputs."""
-        # TODO: generalize this to print out proprio when it is being tokenized
-        pass
+        raise NotImplementedError
 
 def load_np_example_batch(checkpoint_path):
     if checkpoint_path.startswith("hf://"):
