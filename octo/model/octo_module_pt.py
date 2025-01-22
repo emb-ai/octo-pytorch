@@ -85,7 +85,6 @@ class OctoTransformerPt(nn.Module, FromJaxModel):
                     'primary': 256,
                     'wrist': 64,
                     'language': 16,
-                    'proprio': 1,
                     'action': 1
                 },
                  ):
@@ -456,7 +455,6 @@ class OctoModulePt(nn.Module, FromJaxModel):
             'primary': 256,
             'wrist': 64,
             'language': 16,
-            'proprio': 1,
             'action': 1
         }
     ) -> "OctoModulePt":
