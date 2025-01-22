@@ -35,7 +35,6 @@ conda activate octo_pt
 pip install -e .
 pip install -r requirements.txt
 pip install torch torchvision
-pip install --upgrade "jax==0.4.20" -f https://storage.googleapis.com/jax-releases/jax_releases.html
 pip install accelerate
 ```
 
