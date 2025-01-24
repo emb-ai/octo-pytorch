@@ -225,18 +225,15 @@ AssertionError: New value of 'heads.action.diffusion_model.reverse_network.linea
 ```
 
 More specifically, you have a shape mismatch in weights and biases in the `diffusion_model.reverse_network` modules.
-For finetuning, this is not critical, and we can use non-strict weights initialization for this module:
+For finetuning, this is not critical, and we can skip them:
 
 ```python
-model.load_weights_from_jax("hf://rail-berkeley/octo-small-1.5", non_strict_keys=[
-    "heads.action.diffusion_model.reverse_network.linear1.weight",
-    "heads.action.diffusion_model.reverse_network.linear2.weight",
-    "heads.action.diffusion_model.reverse_network.linear1.bias",
-    "heads.action.diffusion_model.reverse_network.linear2.bias",
-])
+model.load_weights_from_jax("hf://rail-berkeley/octo-small-1.5", 
+    skip_keys_regex=".*diffusion_model.reverse_network.[linear1|linear2]"
+)
 ```
 
-Or use a more elegant solution using a regular expression:
+However, we can use slighly better initialization than random for these modules and use non-strict weights initialization:
 
 ```python
 model.load_weights_from_jax("hf://rail-berkeley/octo-small-1.5", 
